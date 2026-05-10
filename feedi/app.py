@@ -18,11 +18,13 @@ def create_app():
     app.logger.info("Starting app with FLASK_ENV=%s", os.getenv("FLASK_ENV"))
 
     with app.app_context():
-        from . import auth, filters, routes, tasks  # noqa
+        from . import api, auth, filters, routes, tasks  # noqa
 
         models.init_db(app)
 
         auth.init()
+
+        app.register_blueprint(api.api)
 
         if not is_running_from_reloader() and not os.environ.get("DISABLE_CRON_TASKS"):
             # we want only one huey scheduler running, so we make sure
