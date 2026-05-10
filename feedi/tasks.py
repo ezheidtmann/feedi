@@ -6,6 +6,7 @@ This module contains tasks that can be scheduled by huey and/or run as flask cli
 
 import csv
 import datetime
+import json
 from functools import wraps
 
 import click
@@ -15,8 +16,10 @@ import sqlalchemy as sa
 from huey import crontab
 from huey.contrib.mini import MiniHuey
 
+import feedi.email as email
 import feedi.models as models
 import feedi.parsers as parsers
+from feedi import scraping
 from feedi.app import create_huey_app
 from feedi.models import db
 
@@ -82,6 +85,124 @@ def sync_feed(feed_id, _feed_name, force=False):
     db_feed = db.session.get(models.Feed, feed_id)
     db_feed.sync_with_remote(force=force)
     db.session.commit()
+
+
+def _set_digest_status(user, **fields):
+    "Merge `fields` into the JSON blob stored on User.last_digest_status and commit."
+    current = {}
+    if user.last_digest_status:
+        try:
+            current = json.loads(user.last_digest_status)
+        except ValueError:
+            current = {}
+    current.update(fields)
+    user.last_digest_status = json.dumps(current)
+    db.session.add(user)
+    db.session.commit()
+
+
+DIGEST_SOURCE_TITLES = {
+    "favorited": "Favorites",
+    "pinned": "Pinned",
+    "queued": "Reading queue",
+}
+
+
+@huey_task()
+def build_and_send_digest(user_id, source):
+    """
+    Build an EPUB digest of the user's entries matching `source` (favorited/pinned/queued),
+    email it to their kindle_email, then update User.last_digest_status. For the 'queued'
+    source, successfully-included entries have their `queued` cleared after the email send.
+    """
+    user = db.session.get(models.User, user_id)
+    if not user or not user.kindle_email:
+        return
+
+    now = datetime.datetime.utcnow()
+    _set_digest_status(
+        user,
+        state="running",
+        source=source,
+        started_at=now.isoformat(),
+        finished_at=None,
+        sent_count=0,
+        failed=[],
+        error=None,
+    )
+
+    try:
+        entries = models.Entry.select_for_digest(user_id, source)
+        if not entries:
+            _set_digest_status(
+                user,
+                state="failed",
+                finished_at=datetime.datetime.utcnow().isoformat(),
+                error="No entries to send.",
+            )
+            return
+
+        items = []
+        failed = []
+        included_entry_ids = []
+        for entry in entries:
+            url = entry.content_url
+            try:
+                article = scraping.extract(url)
+            except Exception as e:
+                app.logger.warning("digest: failed to extract %s: %s", url, e)
+                failed.append({"url": url, "error": str(e) or e.__class__.__name__})
+                items.append({"url": url, "error": str(e) or e.__class__.__name__})
+                continue
+
+            items.append({"url": url, "article": article})
+            entry.content_full = article.get("content")
+            entry.sent_to_kindle = datetime.datetime.utcnow()
+            entry.viewed = entry.viewed or datetime.datetime.utcnow()
+            included_entry_ids.append(entry.id)
+
+        successes = [it for it in items if "article" in it]
+        if not successes:
+            db.session.commit()
+            _set_digest_status(
+                user,
+                state="failed",
+                finished_at=datetime.datetime.utcnow().isoformat(),
+                failed=failed,
+                error="All articles failed to extract.",
+            )
+            return
+
+        today = datetime.date.today().isoformat()
+        source_title = DIGEST_SOURCE_TITLES.get(source, source)
+        title = f"feedi digest — {source_title} — {today}"
+        attach_data = scraping.package_epub(items, title=title, subtitle=source_title)
+        email.send(user.kindle_email, attach_data, filename=title)
+
+        # only clear the queue once email actually succeeded
+        if source == "queued" and included_entry_ids:
+            update = db.update(models.Entry).where(models.Entry.id.in_(included_entry_ids)).values(queued=None)
+            db.session.execute(update)
+        db.session.commit()
+
+        _set_digest_status(
+            user,
+            state="ok",
+            finished_at=datetime.datetime.utcnow().isoformat(),
+            sent_count=len(successes),
+            failed=failed,
+        )
+    except Exception as e:
+        app.logger.exception("digest task failed for user %s", user_id)
+        # don't leave the per-entry sent_to_kindle stamps if the email itself failed
+        db.session.rollback()
+        user = db.session.get(models.User, user_id)
+        _set_digest_status(
+            user,
+            state="failed",
+            finished_at=datetime.datetime.utcnow().isoformat(),
+            error=str(e) or e.__class__.__name__,
+        )
 
 
 @feed_cli.command("prefetch")
