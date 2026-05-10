@@ -505,6 +505,16 @@ def toggle_setting(setting):
     return "", 204
 
 
+@app.get("/k/")
+@login_required
+def kindle_client():
+    """
+    Serve the Svelte-based Kindle-friendly web client. The bundle is built by
+    `make kindle-client` (or the Docker build) into feedi/static/kindle/.
+    """
+    return flask.send_from_directory(app.static_folder, "kindle/index.html")
+
+
 @app.context_processor
 def template_defaults():
     # templates expect this to exist

@@ -1,4 +1,4 @@
-.PHONY: all deps deps-dev deps-lock run docker docker-flask shell test lint format feed-* prod-* user-* db-*
+.PHONY: all deps deps-dev deps-lock run docker docker-flask shell test lint format kindle-client kindle-client-dev feed-* prod-* user-* db-*
 
 flask=uv run flask --app feedi/app.py
 
@@ -22,6 +22,14 @@ deps-dev:
 
 node_modules:
 	npm install || true
+
+# Build the Svelte-based Kindle web client into feedi/static/kindle/
+kindle-client:
+	cd kindle-client && npm install && npm run build
+
+# Run the Vite dev server for the kindle client, proxying /api to the flask dev server
+kindle-client-dev:
+	cd kindle-client && npm install && npm run dev
 
 # make test
 # make test TEST=test_feed_ad
