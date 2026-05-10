@@ -1,4 +1,5 @@
 import datetime
+import json
 
 import flask
 import sqlalchemy as sa
@@ -18,6 +19,7 @@ from feedi.parsers import rss
 @app.route("/folder/<folder>")
 @app.route("/feeds/<feed_id>/entries")
 @app.get("/entries/kindle", defaults={"sent_to_kindle": True}, endpoint="sent_to_kindle")
+@app.get("/entries/queue", defaults={"queued": True}, endpoint="queue")
 @app.route("/")
 @login_required
 def entry_list(**filters):
@@ -189,6 +191,23 @@ def entry_favorite(id):
         entry.favorited = None
     else:
         entry.favorited = datetime.datetime.utcnow()
+
+    db.session.commit()
+    return "", 204
+
+
+@app.put("/queued/<int:id>")
+@login_required
+def entry_queue(id):
+    "Toggle whether the given entry will be included in the next Kindle digest."
+    entry = db.get_or_404(models.Entry, id)
+    if entry.user_id != current_user.id:
+        flask.abort(404)
+
+    if entry.queued:
+        entry.queued = None
+    else:
+        entry.queued = datetime.datetime.utcnow()
 
     db.session.commit()
     return "", 204
@@ -454,6 +473,53 @@ def send_to_kindle():
     db.session.commit()
 
     return "", 204
+
+
+def _current_digest_status():
+    if not current_user.last_digest_status:
+        return {"state": "idle"}
+    try:
+        return json.loads(current_user.last_digest_status)
+    except ValueError:
+        return {"state": "idle"}
+
+
+@app.post("/entries/kindle/digest")
+@login_required
+def send_digest():
+    """
+    Enqueue a background task that builds an EPUB digest of the current user's entries
+    matching `source` (favorited/pinned/queued) and emails it to their Kindle.
+    """
+    if not current_user.kindle_email:
+        return flask.render_template(
+            "digest_status.html",
+            status={"state": "failed", "error": "No Kindle email configured."},
+        ), 400
+
+    source = flask.request.values.get("source")
+    if source not in models.Entry.DIGEST_SOURCES:
+        flask.abort(400, f"unknown source: {source!r}")
+
+    current_status = _current_digest_status()
+    if current_status.get("state") == "running":
+        return flask.render_template("digest_status.html", status=current_status)
+
+    tasks.build_and_send_digest(current_user.id, source)
+
+    status = {
+        "state": "running",
+        "source": source,
+        "started_at": datetime.datetime.utcnow().isoformat(),
+    }
+    return flask.render_template("digest_status.html", status=status)
+
+
+@app.get("/entries/kindle/digest/status")
+@login_required
+def digest_status():
+    "Return the current digest status as an HTMX fragment; polled by the digest button."
+    return flask.render_template("digest_status.html", status=_current_digest_status())
 
 
 @app.route("/feeds/<feed_id>/debug")

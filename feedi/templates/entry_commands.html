@@ -36,6 +36,14 @@ url_for('entry_view', id=entry.id) %}
   _="on htmx:beforeRequest or htmx:afterRequest toggle .fa-spin on <i/> in me"
   ><span class="icon"><i class="fas fa-tablet-alt"></i></span> Send to Kindle</a
 >
+{% if entry.id %}
+<a
+  class="dropdown-item"
+  hx-put="{{ url_for('entry_queue', id=entry.id) }}"
+  ><span class="icon"><i class="fas fa-bookmark"></i></span>
+  {% if entry.queued %}Remove from queue{% else %}Add to queue{% endif %}</a
+>
+{% endif %}
 {% endif %}
 
 <hr class="dropdown-divider" />
