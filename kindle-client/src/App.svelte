@@ -1,42 +1,77 @@
 <script>
   import { onMount } from 'svelte';
   import { api, ApiError } from './lib/api.js';
+  import { route, back } from './lib/router.svelte.js';
+  import TopBar from './components/TopBar.svelte';
+  import EntryList from './components/EntryList.svelte';
+  import Reader from './components/Reader.svelte';
 
-  let state = $state({ status: 'loading', user: null, error: null });
+  let user = $state(null);
+  let bootError = $state(null);
 
   onMount(async () => {
     try {
-      const user = await api.me();
-      state.user = user;
-      state.status = 'ready';
+      user = await api.me();
     } catch (err) {
-      state.error = err instanceof ApiError && err.status === 401
-        ? 'Not logged in. Visit /auth/login first.'
-        : `Error: ${err.message}`;
-      state.status = 'error';
+      if (err instanceof ApiError && err.status === 401) {
+        window.location.href = '/auth/login';
+        return;
+      }
+      bootError = err.message;
     }
   });
+
+  // Derive the list configuration from the current route.
+  const listConfig = $derived.by(() => {
+    switch (route.name) {
+      case 'home':       return { kind: 'entries', params: {} };
+      case 'favorites':  return { kind: 'entries', params: { favorited: 1 } };
+      case 'kindle':     return { kind: 'entries', params: { sent_to_kindle: 1 } };
+      case 'feed':       return { kind: 'entries', params: { feed_id: route.params.id } };
+      case 'folder':     return { kind: 'entries', params: { folder: route.params.name } };
+      case 'pinned':     return { kind: 'pinned', params: {} };
+      default:           return { kind: 'entries', params: {} };
+    }
+  });
+
+  const title = $derived.by(() => {
+    switch (route.name) {
+      case 'home':       return 'Home';
+      case 'favorites':  return 'Favorites';
+      case 'pinned':     return 'Pinned';
+      case 'kindle':     return 'Sent to Kindle';
+      case 'feed':       return `Feed ${route.params.id}`;
+      case 'folder':     return route.params.name;
+      case 'entry':      return '';
+      default:           return '';
+    }
+  });
+
+  const isReader = $derived(route.name === 'entry');
 </script>
 
-<main>
-  <h1>feedi (kindle)</h1>
+{#if bootError}
+  <p class="boot-error">{bootError}</p>
+{:else if !user}
+  <p class="boot">Loading…</p>
+{:else}
+  <TopBar {title} onBack={isReader ? back : null} />
 
-  {#if state.status === 'loading'}
-    <p>Loading…</p>
-  {:else if state.status === 'error'}
-    <p>{state.error}</p>
+  {#if isReader}
+    {#key route.params.id}
+      <Reader entryId={route.params.id} />
+    {/key}
   {:else}
-    <p>Signed in as <strong>{state.user.email}</strong>.</p>
-    <p>Phase 2 scaffold. Entry list and reader coming in phase 3.</p>
+    {#key `${listConfig.kind}:${JSON.stringify(listConfig.params)}`}
+      <EntryList kind={listConfig.kind} params={listConfig.params} />
+    {/key}
   {/if}
-</main>
+{/if}
 
 <style>
-  main {
-    padding: 1em;
+  .boot, .boot-error {
+    padding: 2em;
+    text-align: center;
   }
-  h1 {
-    margin: 0 0 0.5em 0;
-    font-size: 1.4em;
-  }
+  .boot-error { color: #800; }
 </style>
