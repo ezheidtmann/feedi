@@ -209,11 +209,16 @@ def entry_content(id):
     if not entry.content_url and not entry.target_url:
         return flask.jsonify({"error": "entry not readable"}), 400
 
+    # Clients can pass ?prefetch=1 to warm content in the DB without
+    # marking the entry as viewed (used for next-in-list pre-fetch).
+    is_prefetch = flask.request.args.get("prefetch", "").lower() in ("1", "true", "yes")
+
     if entry.content_url:
         entry.fetch_content()
 
     if entry.content_full:
-        entry.viewed = entry.viewed or datetime.datetime.utcnow()
+        if not is_prefetch:
+            entry.viewed = entry.viewed or datetime.datetime.utcnow()
         db.session.commit()
         return flask.jsonify(serialize_entry(entry, include_content=True))
 

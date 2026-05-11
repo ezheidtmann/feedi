@@ -2,8 +2,10 @@
   import { onMount, tick } from 'svelte';
   import { api, ApiError } from '../lib/api.js';
   import { viewport } from '../lib/viewport.svelte.js';
+  import { nextEntryIdAfter } from '../lib/entryCache.svelte.js';
+  import ActionToolbar from './ActionToolbar.svelte';
 
-  let { entryId } = $props();
+  let { entryId, user = null } = $props();
 
   let entry = $state(null);
   let content = $state(null);
@@ -33,6 +35,11 @@
     } finally {
       loading = false;
     }
+
+    // Once the current entry is loaded, fire-and-forget a fetch of the next
+    // entry's content so it's warm in the server's cache when we get there.
+    const nextId = nextEntryIdAfter(entryId);
+    if (nextId) api.entryContentPrefetch(nextId).catch(() => { /* best-effort */ });
   }
 
   $effect(() => {
@@ -41,7 +48,6 @@
   });
 
   $effect(() => {
-    // re-measure totalPages on viewport change or content change
     const _ = `${viewport.w}:${viewport.h}:${content ? content.length : 0}`;
     void _;
     measure();
@@ -51,8 +57,7 @@
     await tick();
     if (!innerEl) return;
     const pageWidth = viewport.w;
-    const total = Math.max(1, Math.ceil(innerEl.scrollWidth / pageWidth));
-    totalPages = total;
+    totalPages = Math.max(1, Math.ceil(innerEl.scrollWidth / pageWidth));
     if (currentPage >= totalPages) currentPage = totalPages - 1;
   }
 
@@ -87,33 +92,44 @@
     const x = e.clientX;
     if (x < viewport.w / 4) prev();
     else if (x > (viewport.w * 3) / 4) next();
-    // middle 50%: do nothing (or open menu in the future)
+  }
+
+  function onEntryChange(updated) {
+    entry = { ...entry, ...updated };
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<div class="reader" onclick={onTap}>
-  {#if loading}
-    <p class="status">Loading…</p>
-  {:else if error}
-    <p class="status error">{error}</p>
-  {:else if externalOnly}
-    <div class="status">
-      <p>This entry isn't readable inside the app.</p>
-      {#if entry?.target_url}
-        <p><a href={entry.target_url} target="_blank" rel="noopener">Open at source</a></p>
-      {/if}
-    </div>
-  {:else if content}
-    <div
-      class="inner"
-      bind:this={innerEl}
-      style="transform: translateX(-{currentPage * viewport.w}px)"
-    >
-      {@html content}
-    </div>
+<div class="reader">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="page-area" onclick={onTap}>
+    {#if loading}
+      <p class="status">Loading…</p>
+    {:else if error}
+      <p class="status error">{error}</p>
+    {:else if externalOnly}
+      <div class="status">
+        <p>This entry isn't readable inside the app.</p>
+        {#if entry?.target_url}
+          <p><a href={entry.target_url} target="_blank" rel="noopener">Open at source</a></p>
+        {/if}
+      </div>
+    {:else if content}
+      <div
+        class="inner"
+        bind:this={innerEl}
+        style="transform: translateX(-{currentPage * viewport.w}px)"
+      >
+        {@html content}
+      </div>
+    {/if}
+  </div>
 
+  {#if entry && !loading}
+    <ActionToolbar entry={entry} hasKindle={user?.has_kindle} onChange={onEntryChange} />
+  {/if}
+
+  {#if !loading && !externalOnly && content}
     <div class="pager">
       <button onclick={prev} disabled={currentPage === 0}>‹</button>
       <span>{currentPage + 1} / {totalPages}</span>
@@ -124,16 +140,21 @@
 
 <style>
   .reader {
-    position: relative;
+    display: flex;
+    flex-direction: column;
     width: 100vw;
     height: calc(100vh - 2.4em);
+  }
+  .page-area {
+    flex: 1 1 auto;
     overflow: hidden;
+    position: relative;
   }
   .inner {
     column-width: 100vw;
     column-gap: 0;
     column-fill: auto;
-    height: calc(100vh - 2.4em - 1.8em);
+    height: 100%;
     padding: 0 1em;
     box-sizing: border-box;
     will-change: transform;
@@ -141,27 +162,41 @@
   .inner :global(img),
   .inner :global(video),
   .inner :global(iframe) {
+    display: block;
     max-width: 100%;
-    max-height: 100%;
+    max-height: 90%;
     height: auto;
+    margin: 0.5em auto;
+    object-fit: contain;
     break-inside: avoid;
   }
-  .inner :global(figure) { margin: 0.5em 0; }
-  .inner :global(pre) {
+  .inner :global(figure) {
+    margin: 0.5em 0;
+    break-inside: avoid;
+  }
+  .inner :global(figcaption) {
+    font-size: 0.85em;
+    color: #555;
+    text-align: center;
+  }
+  .inner :global(pre),
+  .inner :global(table) {
     overflow: hidden;
     white-space: pre-wrap;
     break-inside: avoid;
+    max-width: 100%;
   }
   .inner :global(blockquote) {
     margin: 0.5em 0;
     padding-left: 1em;
     border-left: 2px solid #888;
+    break-inside: avoid;
+  }
+  .inner :global(h1), .inner :global(h2), .inner :global(h3) {
+    break-after: avoid;
   }
   .pager {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;

@@ -2,10 +2,11 @@
   import { onMount, tick } from 'svelte';
   import { api, ApiError } from '../lib/api.js';
   import { viewport } from '../lib/viewport.svelte.js';
+  import { settings } from '../lib/settings.svelte.js';
+  import { computePageStarts } from '../lib/paging.js';
+  import { setEntries } from '../lib/entryCache.svelte.js';
   import EntryCard from './EntryCard.svelte';
 
-  // `kind` is one of: 'entries' (default), 'pinned'.
-  // `params` is the filter object passed to the API (feed_id, folder, favorited, ...).
   let { kind = 'entries', params = {} } = $props();
 
   let entries = $state([]);
@@ -14,9 +15,7 @@
   let error = $state(null);
   let currentPage = $state(0);
 
-  // refs to each rendered card element so we can measure offsets
   let cardRefs = $state([]);
-  // index of first entry on each page (computed after measurement)
   let pageStarts = $state([0]);
 
   let containerEl = $state(null);
@@ -26,10 +25,16 @@
     if (loading) return;
     loading = true;
     try {
+      const queryParams = { ...params };
+      if (kind !== 'pinned') {
+        // Translate the user setting into the API param.
+        queryParams.hide_seen = settings.hideSeen ? '1' : '0';
+        queryParams.cursor = nextCursor || undefined;
+      }
       const data =
         kind === 'pinned'
-          ? await api.pinned(params)
-          : await api.entries({ ...params, cursor: nextCursor || undefined });
+          ? await api.pinned(queryParams)
+          : await api.entries(queryParams);
       if (kind === 'pinned') {
         entries = data.entries;
         nextCursor = null;
@@ -37,6 +42,7 @@
         entries = [...entries, ...data.entries];
         nextCursor = data.next_cursor;
       }
+      setEntries(entries);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         window.location.href = '/auth/login';
@@ -48,10 +54,10 @@
     }
   }
 
-  // Reload from scratch whenever the filter changes.
+  // Reload from scratch whenever the filter or hideSeen setting changes.
   $effect(() => {
-    // depend on kind + serialized params so re-runs are predictable
-    const _ = `${kind}:${JSON.stringify(params)}`;
+    const _ = `${kind}:${JSON.stringify(params)}:${settings.hideSeen}`;
+    void _;
     entries = [];
     nextCursor = null;
     currentPage = 0;
@@ -62,28 +68,16 @@
 
   // Re-measure pages whenever entries or viewport dimensions change.
   $effect(() => {
-    const _trigger = `${entries.length}:${viewport.w}:${viewport.h}`;
-    void _trigger;
+    const _ = `${entries.length}:${viewport.w}:${viewport.h}`;
+    void _;
     measurePages();
   });
 
   async function measurePages() {
     await tick();
     if (!listEl) return;
-    const containerHeight = viewport.h - listEl.getBoundingClientRect().top;
-    if (containerHeight <= 0) return;
-    const starts = [0];
-    let pageTop = cardRefs[0]?.offsetTop ?? 0;
-    for (let i = 1; i < cardRefs.length; i++) {
-      const el = cardRefs[i];
-      if (!el) continue;
-      const bottom = el.offsetTop + el.offsetHeight;
-      if (bottom - pageTop > containerHeight) {
-        starts.push(i);
-        pageTop = el.offsetTop;
-      }
-    }
-    pageStarts = starts;
+    const containerHeight = viewport.h - listEl.getBoundingClientRect().top - 30;
+    pageStarts = computePageStarts(cardRefs, containerHeight);
     if (currentPage >= pageStarts.length) currentPage = Math.max(0, pageStarts.length - 1);
   }
 
@@ -126,7 +120,6 @@
   });
 
   function onTap(e) {
-    // Ignore taps on links/buttons
     if (e.target.closest('a, button')) return;
     const x = e.clientX;
     if (x < viewport.w / 3) prev();
@@ -153,7 +146,7 @@
 
   <div class="pager">
     <button onclick={prev} disabled={currentPage === 0}>‹</button>
-    <span>{currentPage + 1} / {pageStarts.length}</span>
+    <span>{currentPage + 1} / {pageStarts.length}{nextCursor ? '+' : ''}</span>
     <button onclick={next} disabled={currentPage >= pageStarts.length - 1 && !nextCursor}>›</button>
   </div>
 </div>

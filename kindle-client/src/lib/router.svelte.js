@@ -6,6 +6,8 @@ const PATTERNS = [
   { name: 'favorites',  pattern: /^#?\/favorites\/?$/ },
   { name: 'pinned',     pattern: /^#?\/pinned\/?$/ },
   { name: 'kindle',     pattern: /^#?\/kindle\/?$/ },
+  { name: 'feeds',      pattern: /^#?\/feeds\/?$/ },
+  { name: 'settings',   pattern: /^#?\/settings\/?$/ },
   { name: 'feed',       pattern: /^#?\/feed\/(\d+)\/?$/,        params: ['id'] },
   { name: 'folder',     pattern: /^#?\/folder\/([^/]+)\/?$/,    params: ['name'] },
   { name: 'entry',      pattern: /^#?\/entry\/(\d+)\/?$/,       params: ['id'] },

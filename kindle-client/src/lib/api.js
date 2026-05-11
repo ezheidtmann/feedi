@@ -52,6 +52,7 @@ export const api = {
   },
   entry: (id) => request(`/entries/${id}`),
   entryContent: (id) => request(`/entries/${id}/content`),
+  entryContentPrefetch: (id) => request(`/entries/${id}/content?prefetch=1`),
   pin: (id) => request(`/entries/${id}/pin`, { method: 'PUT' }),
   unpin: (id) => request(`/entries/${id}/pin`, { method: 'DELETE' }),
   favorite: (id) => request(`/entries/${id}/favorite`, { method: 'PUT' }),

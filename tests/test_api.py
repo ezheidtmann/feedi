@@ -182,6 +182,21 @@ def test_api_entry_detail_404(client):
     assert resp.status_code == 404
 
 
+def test_api_content_prefetch_does_not_mark_viewed(client):
+    response, _ = create_feed(client, "api-prefetch.com", [{"title": "prefetch-article", "date": "2023-10-01 00:00Z"}])
+    entry_id = _entry_id_from_response(response)
+
+    resp = client.get(f"/api/v1/entries/{entry_id}")
+    assert resp.get_json()["viewed"] is None
+
+    # Prefetching content should NOT mark the entry as viewed, regardless of
+    # whether content extraction itself succeeds.
+    resp = client.get(f"/api/v1/entries/{entry_id}/content?prefetch=1")
+    assert resp.status_code == 200
+    resp = client.get(f"/api/v1/entries/{entry_id}")
+    assert resp.get_json()["viewed"] is None
+
+
 def test_api_kindle_without_email_set(client):
     response, _ = create_feed(client, "api-kndl.com", [{"title": "kndl-article", "date": "2023-10-01 00:00Z"}])
     entry_id = _entry_id_from_response(response)

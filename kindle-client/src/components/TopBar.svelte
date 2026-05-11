@@ -9,8 +9,10 @@
     {:else}
       <nav>
         <a href="#/">Home</a>
-        <a href="#/favorites">Favorites</a>
+        <a href="#/feeds">Feeds</a>
+        <a href="#/favorites">Favs</a>
         <a href="#/pinned">Pinned</a>
+        <a href="#/settings" aria-label="Settings">⚙</a>
       </nav>
     {/if}
   </div>
@@ -33,7 +35,7 @@
   }
   nav {
     display: flex;
-    gap: 1em;
+    gap: 0.8em;
   }
   nav a {
     color: #000;

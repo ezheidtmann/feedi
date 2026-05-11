@@ -5,6 +5,8 @@
   import TopBar from './components/TopBar.svelte';
   import EntryList from './components/EntryList.svelte';
   import Reader from './components/Reader.svelte';
+  import FeedList from './components/FeedList.svelte';
+  import Settings from './components/Settings.svelte';
 
   let user = $state(null);
   let bootError = $state(null);
@@ -21,7 +23,6 @@
     }
   });
 
-  // Derive the list configuration from the current route.
   const listConfig = $derived.by(() => {
     switch (route.name) {
       case 'home':       return { kind: 'entries', params: {} };
@@ -29,7 +30,7 @@
       case 'kindle':     return { kind: 'entries', params: { sent_to_kindle: 1 } };
       case 'feed':       return { kind: 'entries', params: { feed_id: route.params.id } };
       case 'folder':     return { kind: 'entries', params: { folder: route.params.name } };
-      case 'pinned':     return { kind: 'pinned', params: {} };
+      case 'pinned':     return { kind: 'pinned',  params: {} };
       default:           return { kind: 'entries', params: {} };
     }
   });
@@ -42,12 +43,17 @@
       case 'kindle':     return 'Sent to Kindle';
       case 'feed':       return `Feed ${route.params.id}`;
       case 'folder':     return route.params.name;
+      case 'feeds':      return 'Feeds';
+      case 'settings':   return 'Settings';
       case 'entry':      return '';
       default:           return '';
     }
   });
 
   const isReader = $derived(route.name === 'entry');
+  const isList = $derived(
+    ['home', 'favorites', 'pinned', 'kindle', 'feed', 'folder'].includes(route.name)
+  );
 </script>
 
 {#if bootError}
@@ -59,9 +65,13 @@
 
   {#if isReader}
     {#key route.params.id}
-      <Reader entryId={route.params.id} />
+      <Reader entryId={route.params.id} {user} />
     {/key}
-  {:else}
+  {:else if route.name === 'feeds'}
+    <FeedList />
+  {:else if route.name === 'settings'}
+    <Settings />
+  {:else if isList}
     {#key `${listConfig.kind}:${JSON.stringify(listConfig.params)}`}
       <EntryList kind={listConfig.kind} params={listConfig.params} />
     {/key}
