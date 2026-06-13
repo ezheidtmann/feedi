@@ -1,5 +1,9 @@
 import datetime as dt
+import io
+import json
 import re
+import zipfile
+from xml.etree import ElementTree as ET
 
 from tests.conftest import create_feed, extract_entry_ids, mock_feed, mock_request
 
@@ -346,6 +350,247 @@ def test_feed_list(client):
 def test_feed_edit(client):
     # TODO
     pass
+
+
+def _set_kindle_email(app, email_addr):
+    from feedi.models import User, db
+
+    with app.app_context():
+        user = db.session.scalar(db.select(User).order_by(User.id.desc()))
+        user.kindle_email = email_addr
+        db.session.commit()
+        return user.id
+
+
+def _make_fake_article(title):
+    return {
+        "title": title,
+        "byline": "Test Author",
+        "siteName": "Test Site",
+        "content": "<p>fake body for " + title + "</p>",
+        "lang": "en",
+        "publishedTime": "2024-01-01",
+    }
+
+
+def test_queue_toggle(client, app):
+    response, _feed_id = create_feed(
+        client,
+        "queue-feed.com",
+        [
+            {"title": "qa-1", "date": "2024-01-01 00:00Z"},
+            {"title": "qa-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+
+    # toggle on
+    response = client.put(f"/queued/{entry_ids[0]}")
+    assert response.status_code == 204
+
+    response = client.get("/entries/queue")
+    assert "qa-1" in response.text or "qa-2" in response.text
+
+    # toggle off
+    response = client.put(f"/queued/{entry_ids[0]}")
+    assert response.status_code == 204
+
+
+def test_digest_send_success(client, app, monkeypatch):
+    import feedi.email
+    import feedi.scraping
+    import feedi.tasks
+    from feedi.models import Entry, User, db
+
+    response, _feed_id = create_feed(
+        client,
+        "digest-feed.com",
+        [
+            {"title": "da-1", "date": "2024-01-01 00:00Z"},
+            {"title": "da-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+
+    # Mark both queued.
+    for eid in entry_ids[:2]:
+        client.put(f"/queued/{eid}")
+
+    user_id = _set_kindle_email(app, "user@kindle.com")
+
+    extracted = []
+
+    def fake_extract(url=None, html=None):
+        extracted.append(url)
+        return _make_fake_article(url or "fake")
+
+    sent = []
+
+    def fake_send(recipient, attach_data, filename):
+        sent.append({"recipient": recipient, "filename": filename, "bytes": attach_data})
+
+    monkeypatch.setattr(feedi.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.email, "send", fake_send)
+    # also patch the names imported into the tasks module
+    monkeypatch.setattr(feedi.tasks.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.tasks.email, "send", fake_send)
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "queued").get()
+
+        user = db.session.get(User, user_id)
+        status = json.loads(user.last_digest_status)
+        assert status["state"] == "ok"
+        assert status["sent_count"] == 2
+
+        # queue cleared, kindle stamps set
+        queued = db.session.scalars(db.select(Entry).filter(Entry.queued.is_not(None))).all()
+        assert queued == []
+        stamped = db.session.scalars(db.select(Entry).filter(Entry.sent_to_kindle.is_not(None))).all()
+        assert len(stamped) == 2
+
+    assert len(sent) == 1
+    assert sent[0]["recipient"] == "user@kindle.com"
+    assert len(extracted) == 2
+
+
+def test_digest_partial_failure(client, app, monkeypatch):
+    import feedi.email
+    import feedi.scraping
+    import feedi.tasks
+    from feedi.models import Entry, User, db
+
+    response, _feed_id = create_feed(
+        client,
+        "partial-feed.com",
+        [
+            {"title": "pa-1", "date": "2024-01-01 00:00Z"},
+            {"title": "pa-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+    for eid in entry_ids[:2]:
+        client.put(f"/queued/{eid}")
+
+    user_id = _set_kindle_email(app, "user@kindle.com")
+
+    call_count = {"n": 0}
+
+    def flaky_extract(url=None, html=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("boom")
+        return _make_fake_article(url or "ok")
+
+    sent = []
+
+    def fake_send(recipient, attach_data, filename):
+        sent.append(attach_data)
+
+    monkeypatch.setattr(feedi.tasks.scraping, "extract", flaky_extract)
+    monkeypatch.setattr(feedi.tasks.email, "send", fake_send)
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "queued").get()
+
+        user = db.session.get(User, user_id)
+        status = json.loads(user.last_digest_status)
+        assert status["state"] == "ok"
+        assert status["sent_count"] == 1
+        assert len(status["failed"]) == 1
+
+        # queue partially cleared: the failed entry stays queued.
+        remaining = db.session.scalars(db.select(Entry).filter(Entry.queued.is_not(None))).all()
+        assert len(remaining) == 1
+
+    assert len(sent) == 1
+
+
+def test_digest_send_route_refuses_without_kindle_email(client):
+    response = client.post("/entries/kindle/digest", data={"source": "queued"})
+    assert response.status_code == 400
+
+
+def test_digest_send_route_rejects_unknown_source(client, app):
+    _set_kindle_email(app, "user@kindle.com")
+    response = client.post("/entries/kindle/digest", data={"source": "bogus"})
+    assert response.status_code == 400
+
+
+def test_package_epub_xml_safe_with_special_chars():
+    from feedi.scraping import package_epub
+
+    article = {
+        "title": 'Bobby <> & "Tables"',
+        "byline": "<author>",
+        "siteName": "Sneaky & Co.",
+        "content": "<p>fine body</p>",
+        "lang": "en",
+        "publishedTime": "2024-01-01",
+    }
+    data = package_epub("http://example.com/article", article)
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        opf = z.read("content.opf").decode()
+        # If escaping is broken this will raise.
+        ET.fromstring(opf)
+        # The literal special chars should be escaped in the title.
+        assert "Bobby <>" not in opf
+        assert "Bobby &lt;&gt;" in opf
+
+
+def test_package_epub_multi_article_structure():
+    from feedi.scraping import package_epub
+
+    items = [
+        {"url": "http://a.example.com/1", "article": _make_fake_article("Article One")},
+        {"url": "http://a.example.com/2", "article": _make_fake_article("Article Two")},
+        {"url": "http://broken.example.com/3", "error": "RequestException"},
+    ]
+    data = package_epub(items, title="feedi digest", subtitle="Favorites")
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = set(z.namelist())
+        assert "article_1.html" in names
+        assert "article_2.html" in names
+        assert "cover.xhtml" in names
+        assert "nav.xhtml" in names
+        assert "failures.xhtml" in names
+        # No single-article file in multi-article mode.
+        assert "article.html" not in names
+
+        nav = z.read("nav.xhtml").decode()
+        assert "Article One" in nav
+        assert "Article Two" in nav
+
+        failures = z.read("failures.xhtml").decode()
+        assert "broken.example.com" in failures
+        assert "RequestException" in failures
+
+        # content.opf must parse as XML.
+        ET.fromstring(z.read("content.opf"))
+
+
+def test_safe_get_rejects_loopback(app):
+    from feedi.requests import UnsafeURLError, safe_get
+
+    # Disable the testing bypass for this single call.
+    with app.app_context():
+        app.config["DISABLE_SSRF_GUARD"] = False
+        try:
+            try:
+                safe_get("http://127.0.0.1/admin")
+                assert False, "expected UnsafeURLError"
+            except UnsafeURLError:
+                pass
+
+            try:
+                safe_get("file:///etc/passwd")
+                assert False, "expected UnsafeURLError"
+            except UnsafeURLError:
+                pass
+        finally:
+            app.config["DISABLE_SSRF_GUARD"] = True
 
 
 def test_feed_delete(client):

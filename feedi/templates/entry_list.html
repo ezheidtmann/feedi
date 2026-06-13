@@ -1,6 +1,31 @@
 {% extends "base.html" %}
 
 {% block content %}
+{% set digest_source = ('queued' if filters.queued else ('favorited' if filters.favorited else None)) %}
+{% if current_user.kindle_email and (digest_source and entries or pinned and not digest_source) %}
+<div class="box is-radiusless">
+  <div id="digest-status">
+    {% include "digest_status.html" %}
+  </div>
+  {% if digest_source and entries %}
+  <button class="button is-primary is-small"
+          hx-post="{{ url_for('send_digest', source=digest_source) }}"
+          hx-target="#digest-status"
+          hx-swap="innerHTML">
+    <span class="icon"><i class="fas fa-tablet-alt"></i></span>
+    <span>Send {{ digest_source }} as digest to Kindle</span>
+  </button>
+  {% elif pinned %}
+  <button class="button is-primary is-small"
+          hx-post="{{ url_for('send_digest', source='pinned') }}"
+          hx-target="#digest-status"
+          hx-swap="innerHTML">
+    <span class="icon"><i class="fas fa-tablet-alt"></i></span>
+    <span>Send pinned as digest to Kindle</span>
+  </button>
+  {% endif %}
+</div>
+{% endif %}
 <div hx-boost="true">
   {% with entries = pinned, next_page = None, is_pinned_list = True%}
     <div id="pinned-entry-list">

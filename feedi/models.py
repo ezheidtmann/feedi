@@ -54,6 +54,11 @@ class User(UserMixin, db.Model):
 
     kindle_email = db.Column(db.String(100))
 
+    last_digest_status = db.Column(
+        db.String,
+        doc="JSON-encoded status of the last digest send: {state, source, started_at, finished_at, sent_count, failed}.",
+    )
+
     @staticmethod
     def hash_password(raw_password):
         return security.generate_password_hash(raw_password)
@@ -340,6 +345,7 @@ class Entry(db.Model):
     viewed = sa.Column(sa.TIMESTAMP, index=True)
     favorited = sa.Column(sa.TIMESTAMP, index=True)
     pinned = sa.Column(sa.TIMESTAMP, index=True)
+    queued = sa.Column(sa.TIMESTAMP, index=True)
 
     sent_to_kindle = sa.Column(sa.TIMESTAMP, index=True)
 
@@ -406,6 +412,7 @@ class Entry(db.Model):
         hide_seen=False,
         favorited=None,
         sent_to_kindle=None,
+        queued=None,
         feed_id=None,
         username=None,
         folder=None,
@@ -437,6 +444,9 @@ class Entry(db.Model):
         if sent_to_kindle:
             query = query.filter(cls.sent_to_kindle.is_not(None))
 
+        if queued:
+            query = query.filter(cls.queued.is_not(None))
+
         if feed_id:
             query = query.filter(cls.feed.has(id=feed_id))
 
@@ -464,6 +474,28 @@ class Entry(db.Model):
 
         return db.session.scalars(query).all()
 
+    DIGEST_SOURCES = ("favorited", "pinned", "queued")
+
+    @classmethod
+    def select_for_digest(cls, user_id, source):
+        """
+        Return all entries belonging to the given digest source (favorited/pinned/queued)
+        ordered newest-first by sort_date, with content_full eagerly loaded so the digest
+        task doesn't trigger N+1 lazy loads.
+        """
+        if source not in cls.DIGEST_SOURCES:
+            raise ValueError(f"unknown digest source: {source!r}")
+
+        column = getattr(cls, source)
+        query = (
+            db.select(cls)
+            .filter_by(user_id=user_id)
+            .filter(column.is_not(None), cls.content_url.is_not(None))
+            .order_by(cls.sort_date.desc())
+            .options(sa.orm.undefer(cls.content_full))
+        )
+        return db.session.scalars(query).all()
+
     @classmethod
     def filter_by(cls, user_id, start_at, **filters):
         """
@@ -477,6 +509,9 @@ class Entry(db.Model):
 
         elif filters.get("sent_to_kindle"):
             return query.order_by(cls.sent_to_kindle.desc())
+
+        elif filters.get("queued"):
+            return query.order_by(cls.queued.desc())
 
         # Order entries by least frequent feeds first then reverse-chronologically for entries in the same
         # frequency rank.

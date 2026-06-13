@@ -21,6 +21,8 @@
                 <a class="dropdown-item {% if filters.favorited %}is-active{% endif %}" href="{{ url_for('favorites') }}">
                     <icon class="icon"><i class="far fa-star"></i></icon> favorites</a>
                 {% if current_user.kindle_email %}
+                <a class="dropdown-item {% if filters.queued %}is-active{% endif %}" href="{{ url_for('queue') }}">
+                    <icon class="icon"><i class="fas fa-bookmark"></i></icon> queue</a>
                 <a class="dropdown-item {% if filters.sent_to_kindle %}is-active{% endif %}" href="{{ url_for('sent_to_kindle') }}">
                     <icon class="icon"><i class="fas fa-tablet-alt"></i></icon> kindle log</a>
                 <a class="dropdown-item" href="{{ url_for('feed_list') }}"><icon class="icon"><i class="far fa-edit"></i></icon> feeds</a>
@@ -80,6 +82,17 @@
                                 </div>
                             </div>
                         </li>
+                        {% if current_user.kindle_email %}
+                        <li>
+                            <div class="level-right {% if filters.queued %}is-active{% endif %}">
+                                <div class="level-item">
+                                    <a href="{{ url_for('queue') }}">
+                                      queue
+                                      <icon class="icon"><i class="fas fa-bookmark"></i></icon>
+                                    </a>
+                                </div>
+                            </div>
+                        </li>
                         <li>
                             <div class="level-right {% if filters.sent_to_kindle %}is-active{% endif %}">
                                 <div class="level-item">
@@ -90,6 +103,7 @@
                                 </div>
                             </div>
                         </li>
+                        {% endif %}
                         <li>
                             <div class="level-right">
                                 <div class="level-item">
