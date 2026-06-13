@@ -1,5 +1,13 @@
 FROM node:20-alpine AS node
 
+# Build the Svelte-based Kindle client bundle in a dedicated stage
+FROM node:20-alpine AS kindle-client-build
+WORKDIR /build
+COPY kindle-client/package.json kindle-client/package-lock.json* ./kindle-client/
+RUN cd kindle-client && (npm ci || npm install)
+COPY kindle-client ./kindle-client
+RUN cd kindle-client && npm run build
+
 FROM python:3.11-alpine
 
 # Copy node to python-alpine image
@@ -24,6 +32,9 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY . .
+
+# Copy the built Svelte bundle into the static dir served by Flask
+COPY --from=kindle-client-build /build/feedi/static/kindle ./feedi/static/kindle
 
 EXPOSE 9988
 

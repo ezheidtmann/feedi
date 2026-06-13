@@ -10,7 +10,7 @@ import feedi.app as feedi_app
 from feedi.models import db
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def app():
     assert os.getenv("FLASK_ENV") == "testing", "not running in testing mode"
 

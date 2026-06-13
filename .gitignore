@@ -169,3 +169,9 @@ feeds.csv
 node_modules/
 kindle.creds
 feedi/config/production.py
+
+# Built Svelte client bundle (produced by `make kindle-client`)
+feedi/static/kindle/
+
+# Counteract the Python `lib/` ignore for the Svelte client sources
+!kindle-client/src/lib/
