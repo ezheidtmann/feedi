@@ -1,0 +1,16 @@
+# Build artifacts and local state that must never be copied into the image.
+# In particular a local .venv would clobber the image's uv-built venv and break
+# `uv run` at runtime (its interpreter symlink points outside the container).
+.venv/
+node_modules/
+kindle-client/node_modules/
+instance/
+*.db
+*.db-wal
+*.db-shm
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+feedi/config/production.py
