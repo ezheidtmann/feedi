@@ -52,6 +52,9 @@ def entry_list(**filters):
         next_page=next_page,
         is_mixed_feed_view=is_mixed_feed_list,
         filters=filters,
+        # the digest button block includes digest_status.html, which needs `status`;
+        # surface the live status so a mid-build digest shows "building…" on load.
+        status=_current_digest_status(),
     )
 
 
