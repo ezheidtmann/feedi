@@ -108,6 +108,23 @@ DIGEST_SOURCE_TITLES = {
 }
 
 
+def _mark_sent(source, entry_ids):
+    """
+    Mark the given entries as delivered to the kindle, so a later digest skips them,
+    and drop them from the reading queue if that's where they came from.
+    """
+    if not entry_ids:
+        return
+
+    now = datetime.datetime.utcnow()
+    values = {"sent_to_kindle": now, "viewed": sa.func.coalesce(models.Entry.viewed, now)}
+    if source == "queued":
+        values["queued"] = None
+
+    db.session.execute(db.update(models.Entry).where(models.Entry.id.in_(entry_ids)).values(**values))
+    db.session.commit()
+
+
 @huey_task()
 def build_and_send_digest(user_id, source):
     """
@@ -132,6 +149,8 @@ def build_and_send_digest(user_id, source):
         error=None,
     )
 
+    sent_count = 0
+    parts_sent = 0
     try:
         entries = models.Entry.select_for_digest(user_id, source)
         if not entries:
@@ -145,7 +164,6 @@ def build_and_send_digest(user_id, source):
 
         items = []
         failed = []
-        included_entry_ids = []
         for entry in entries:
             url = entry.content_url
             try:
@@ -156,11 +174,10 @@ def build_and_send_digest(user_id, source):
                 items.append({"url": url, "error": str(e) or e.__class__.__name__})
                 continue
 
-            items.append({"url": url, "article": article})
+            # entry_id lets us mark exactly the entries that made it into each email,
+            # once that email has actually been accepted by the mail server
+            items.append({"url": url, "article": article, "entry_id": entry.id})
             entry.content_full = article.get("content")
-            entry.sent_to_kindle = datetime.datetime.utcnow()
-            entry.viewed = entry.viewed or datetime.datetime.utcnow()
-            included_entry_ids.append(entry.id)
 
         successes = [it for it in items if "article" in it]
         if not successes:
@@ -191,29 +208,33 @@ def build_and_send_digest(user_id, source):
             )
             email.send(user.kindle_email, batch["data"], filename=batch["title"])
 
-        # only clear the queue once email actually succeeded
-        if source == "queued" and included_entry_ids:
-            update = db.update(models.Entry).where(models.Entry.id.in_(included_entry_ids)).values(queued=None)
-            db.session.execute(update)
-        db.session.commit()
+            # Commit per batch, not once at the end: with several emails a partial send
+            # is a normal outcome, and articles that did go out must stay marked so a
+            # retry picks up where this left off rather than resending them.
+            _mark_sent(source, [it["entry_id"] for it in batch["items"] if it.get("entry_id")])
+            sent_count += batch["count"]
+            parts_sent += 1
 
         _set_digest_status(
             user,
             state="ok",
             finished_at=datetime.datetime.utcnow().isoformat(),
-            sent_count=len(successes),
-            parts=len(batches),
+            sent_count=sent_count,
+            parts=parts_sent,
             failed=failed,
         )
     except Exception as e:
         app.logger.exception("digest task failed for user %s", user_id)
-        # don't leave the per-entry sent_to_kindle stamps if the email itself failed
+        # drop whatever the failed batch left uncommitted; batches already emailed
+        # keep their marks from their own commit
         db.session.rollback()
         user = db.session.get(models.User, user_id)
         _set_digest_status(
             user,
             state="failed",
             finished_at=datetime.datetime.utcnow().isoformat(),
+            sent_count=sent_count,
+            parts=parts_sent,
             error=str(e) or e.__class__.__name__,
         )
 

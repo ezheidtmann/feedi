@@ -658,16 +658,51 @@ def test_package_epub_batches_splits_when_over_limit():
             seen_articles += article_files
             assert "cover.xhtml" in names
             assert "nav.xhtml" in names
-            # every nav link must resolve inside its own epub
+            # the TOC must link every article in this part and nothing that lives in
+            # another one, otherwise the reader gets dangling links
             nav = z.read("nav.xhtml").decode()
-            for name in article_files:
-                assert f'href="{name}"' in nav
+            assert sorted(re.findall(r'href="(article_\d+\.html)"', nav)) == article_files
             # failed extractions are listed once, in the last part
             assert ("failures.xhtml" in names) == (number == len(batches))
             ET.fromstring(z.read("content.opf").decode())
 
     # each article appears exactly once across the batches, under a unique name
     assert sorted(seen_articles) == ["article_1.html", "article_2.html", "article_3.html"]
+
+
+def test_package_epub_batches_parts_are_smaller_than_the_whole():
+    from feedi.scraping import EPUB_OVERHEAD_BYTES, package_epub, package_epub_batches
+
+    items = [{"url": f"http://a.example.com/{i}", "article": _big_article(f"Article {i}", 40_000)} for i in range(1, 4)]
+
+    whole = package_epub(items, title="feedi digest", subtitle="Favorites")
+    batches = package_epub_batches(
+        items, title="feedi digest", subtitle="Favorites", max_bytes=EPUB_OVERHEAD_BYTES + 60_000
+    )
+
+    # splitting has to actually shrink each attachment, not just relabel them
+    assert len(batches) == 3
+    for batch in batches:
+        assert len(batch["data"]) < len(whole)
+
+
+def test_package_epub_batches_reports_the_items_in_each_part():
+    from feedi.scraping import EPUB_OVERHEAD_BYTES, package_epub_batches
+
+    items = [{"url": f"http://a.example.com/{i}", "article": _big_article(f"Article {i}", 40_000)} for i in range(1, 4)]
+    items.append({"url": "http://broken.example.com/x", "error": "RequestException"})
+
+    batches = package_epub_batches(
+        items, title="feedi digest", subtitle="Favorites", max_bytes=EPUB_OVERHEAD_BYTES + 60_000
+    )
+
+    # the caller marks entries as sent per part, so each part must report exactly the
+    # items it carried, and failed extractions must never be reported as delivered
+    assert [[it["url"] for it in b["items"]] for b in batches] == [
+        ["http://a.example.com/1"],
+        ["http://a.example.com/2"],
+        ["http://a.example.com/3"],
+    ]
 
 
 def test_package_epub_batches_single_batch_when_under_limit():
@@ -713,8 +748,11 @@ def test_digest_splits_into_several_emails(client, app, monkeypatch):
     monkeypatch.setattr(feedi.email, "send", fake_send)
     monkeypatch.setattr(feedi.tasks.scraping, "extract", fake_extract)
     monkeypatch.setattr(feedi.tasks.email, "send", fake_send)
-    app.config["MAX_ATTACHMENT_BYTES"] = feedi.scraping.EPUB_OVERHEAD_BYTES + 60_000
-    feedi.tasks.app.config["MAX_ATTACHMENT_BYTES"] = app.config["MAX_ATTACHMENT_BYTES"]
+    # the app fixture is session-scoped and feedi.tasks.app is a second app built by
+    # create_huey_app(), so both need setting and both need restoring
+    max_bytes = feedi.scraping.EPUB_OVERHEAD_BYTES + 60_000
+    monkeypatch.setitem(app.config, "MAX_ATTACHMENT_BYTES", max_bytes)
+    monkeypatch.setitem(feedi.tasks.app.config, "MAX_ATTACHMENT_BYTES", max_bytes)
 
     with app.app_context():
         feedi.tasks.build_and_send_digest(user_id, "favorited").get()
@@ -727,9 +765,72 @@ def test_digest_splits_into_several_emails(client, app, monkeypatch):
     assert len(sent) == 2
     assert sent[0]["filename"].endswith("(1/2)")
     assert sent[1]["filename"].endswith("(2/2)")
-    for s in sent:
-        assert s["recipient"] == "user@kindle.com"
-        assert len(s["bytes"]) <= app.config["MAX_ATTACHMENT_BYTES"]
+    assert [s["recipient"] for s in sent] == ["user@kindle.com", "user@kindle.com"]
+    # each part carries one article, so neither can be the whole digest
+    assert all(len(s["bytes"]) < sum(len(o["bytes"]) for o in sent) for s in sent)
+
+
+def test_digest_partial_send_keeps_delivered_articles_marked(client, app, monkeypatch):
+    import feedi.email
+    import feedi.scraping
+    import feedi.tasks
+    from feedi.models import Entry, User, db
+
+    response, _feed_id = create_feed(
+        client,
+        "flaky-feed.com",
+        [
+            {"title": "fl-1", "date": "2024-01-01 00:00Z"},
+            {"title": "fl-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+    for eid in entry_ids[:2]:
+        client.put(f"/queued/{eid}")
+
+    user_id = _set_kindle_email(app, "user@kindle.com")
+
+    def fake_extract(url=None, html=None):
+        return _big_article(url or "fake", 40_000)
+
+    sent = []
+
+    def flaky_send(recipient, attach_data, filename):
+        "Deliver the first part, then blow up like a dropped SMTP connection."
+        if sent:
+            raise OSError("connection reset")
+        sent.append(filename)
+
+    monkeypatch.setattr(feedi.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.tasks.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.email, "send", flaky_send)
+    monkeypatch.setattr(feedi.tasks.email, "send", flaky_send)
+    max_bytes = feedi.scraping.EPUB_OVERHEAD_BYTES + 60_000
+    monkeypatch.setitem(app.config, "MAX_ATTACHMENT_BYTES", max_bytes)
+    monkeypatch.setitem(feedi.tasks.app.config, "MAX_ATTACHMENT_BYTES", max_bytes)
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "queued").get()
+
+        status = json.loads(db.session.get(User, user_id).last_digest_status)
+        assert status["state"] == "failed"
+        # the part that did go out is reported, not silently counted as nothing
+        assert status["sent_count"] == 1
+        assert status["parts"] == 1
+
+        # exactly the delivered article stays marked, so a retry sends only the other one
+        stamped = db.session.scalars(
+            db.select(Entry).filter(Entry.id.in_(entry_ids), Entry.sent_to_kindle.is_not(None))
+        ).all()
+        assert len(stamped) == 1
+        assert stamped[0].queued is None
+        assert stamped[0].viewed is not None
+
+        retry = Entry.select_for_digest(user_id, "queued")
+        assert len(retry) == 1
+        assert retry[0].id != stamped[0].id
+
+    assert len(sent) == 1
 
 
 def test_safe_get_rejects_loopback(app):

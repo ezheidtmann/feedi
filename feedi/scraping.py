@@ -219,6 +219,11 @@ def _article_header_html(article, url):
     return "".join(parts)
 
 
+# Local header + central directory entry + the manifest line the file needs in the opf.
+# Measured at ~137 bytes; rounded up so the batch estimate stays an upper bound.
+ZIP_ENTRY_OVERHEAD_BYTES = 256
+
+
 def _split_items(items):
     "Partition digest items into the ones that extracted cleanly and the ones that didn't."
     successes = [it for it in items if "article" in it and it.get("article")]
@@ -252,8 +257,14 @@ def _render_article(item, idx, single=False):
         "href": "article.html" if single else f"article_{idx}.html",
         "html": html,
         "images": images,
-        # uncompressed byte cost; an upper bound on what this article adds to the zip
-        "size": len(html.encode("utf-8")) + sum(len(data) for _, data, _ in images),
+        # What this article costs the zip: its uncompressed payload (images are already
+        # compressed, so deflate wins nothing back on them) plus the per-file zip and
+        # manifest overhead, which grows with the file count rather than the byte count.
+        "size": (
+            len(html.encode("utf-8"))
+            + sum(len(data) for _, data, _ in images)
+            + ZIP_ENTRY_OVERHEAD_BYTES * (1 + len(images))
+        ),
     }
 
 
@@ -359,14 +370,15 @@ def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
 
 # Room left for the epub container files (cover, nav, opf) on top of the article
 # payload when deciding where to cut a batch.
-EPUB_OVERHEAD_BYTES = 128 * 1024
+EPUB_OVERHEAD_BYTES = 32 * 1024
 
 
 def package_epub_batches(items, *, title=None, subtitle=None, max_bytes):
     """
     Package a digest into as many epubs as it takes to keep each one under `max_bytes`,
     so an oversized digest can go out as several emails instead of being rejected by the
-    mail server. Returns a list of {"data", "title", "count"} dicts, in reading order.
+    mail server. Returns a list of {"data", "title", "count", "items"} dicts, in reading
+    order; "items" are the input items that went into that epub.
 
     Articles (and their images) are fetched and rendered exactly once, then assembled
     into batches, so splitting costs no extra network traffic. Failed extractions are
@@ -379,8 +391,9 @@ def package_epub_batches(items, *, title=None, subtitle=None, max_bytes):
 
     rendered = [_render_article(it, idx) for idx, it in enumerate(successes, start=1)]
 
-    # Greedy pack on uncompressed size, which over-estimates the zipped result and so
-    # only ever errs towards smaller batches.
+    # Greedy pack on the uncompressed estimate from _render_article, which bounds the
+    # zipped result from above, less a reserve for the cover/nav/opf that every epub
+    # carries regardless of how many articles are in it.
     budget = max(max_bytes - EPUB_OVERHEAD_BYTES, 1)
     batches = []
     current = []
@@ -390,11 +403,12 @@ def package_epub_batches(items, *, title=None, subtitle=None, max_bytes):
             batches.append(current)
             current, current_size = [], 0
         if not current and doc["size"] > budget:
+            # nothing to split further: it goes out alone and may still be rejected
             logger.warning(
-                "digest: article %s is %d bytes on its own, over the %d byte limit",
+                "digest: article %s needs %d bytes on its own, over the %d byte budget",
                 doc["item"].get("url"),
                 doc["size"],
-                max_bytes,
+                budget,
             )
         current.append(doc)
         current_size += doc["size"]
@@ -411,7 +425,14 @@ def package_epub_batches(items, *, title=None, subtitle=None, max_bytes):
             title=batch_title,
             subtitle=subtitle,
         )
-        packaged.append({"data": data, "title": batch_title, "count": len(batch)})
+        packaged.append(
+            {
+                "data": data,
+                "title": batch_title,
+                "count": len(batch),
+                "items": [doc["item"] for doc in batch],
+            }
+        )
 
     return packaged
 
