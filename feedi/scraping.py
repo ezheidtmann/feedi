@@ -152,10 +152,10 @@ def _resolve_published(article):
     return published and published.date().isoformat()
 
 
-def _localize_images(soup, zip, subdir):
+def _localize_images(soup, subdir):
     """
-    Walk every <img>, fetch it, rewrite the src to a local path inside the zip and
-    write the bytes into `subdir/`. Returns the list of (filename, media-type) added.
+    Walk every <img>, fetch it and rewrite the src to a local path under `subdir/`.
+    Returns the list of (filename, data, media-type) to write into the epub zip.
     Filenames are hashed to avoid collisions when two source URLs share a basename.
     """
     written = []
@@ -189,18 +189,18 @@ def _localize_images(soup, zip, subdir):
             continue
 
         try:
-            with zip.open(img_filename, "w") as dest_file:
-                if is_webp:
-                    jpg_img = Image.open(io.BytesIO(response.content)).convert("RGB")
-                    jpg_img.save(dest_file, "JPEG")
-                else:
-                    dest_file.write(response.content)
+            if is_webp:
+                buffer = io.BytesIO()
+                Image.open(io.BytesIO(response.content)).convert("RGB").save(buffer, "JPEG")
+                data = buffer.getvalue()
+            else:
+                data = response.content
         except Exception:
-            logger.exception("error writing image into epub: %s", img_url)
+            logger.exception("error converting image for epub: %s", img_url)
             continue
 
         media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-        written.append((img_filename, media_type))
+        written.append((img_filename, data, media_type))
     return written
 
 
@@ -219,28 +219,46 @@ def _article_header_html(article, url):
     return "".join(parts)
 
 
-def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
-    """
-    Build an EPUB containing one or more articles, returning the zipped bytes.
-
-    Backwards-compatible single-article call: `package_epub(url, article)`.
-    Digest call: `package_epub(items, title=..., subtitle=...)` where each item is
-        {"url": str, "article": readability-dict} for successes and
-        {"url": str, "error": str} for failed items (rendered as a final chapter).
-    """
-    if isinstance(url_or_items, str):
-        items = [{"url": url_or_items, "article": article}]
-        single = True
-    else:
-        items = list(url_or_items)
-        single = False
-
+def _split_items(items):
+    "Partition digest items into the ones that extracted cleanly and the ones that didn't."
     successes = [it for it in items if "article" in it and it.get("article")]
     failures = [it for it in items if "article" not in it or not it.get("article")]
+    return successes, failures
 
-    if not successes:
-        raise ValueError("package_epub needs at least one successfully extracted article")
 
+def _render_article(item, idx, single=False):
+    """
+    Render one extracted item into the xhtml document and image blobs that represent it
+    inside an epub. Images are fetched here, so rendering an article once is enough even
+    when the digest ends up split across several epubs.
+    """
+    art = item["article"]
+    item_url = item.get("url") or ""
+    header = "" if single else _article_header_html(art, item_url)
+    soup = BeautifulSoup(art.get("content") or "", "lxml")
+    images = _localize_images(soup, f"article_{idx}_files")
+    title_for_doc = xml_escape(art.get("title") or item_url or "Untitled")
+    html = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<!DOCTYPE html>\n"
+        '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+        f"<head><title>{title_for_doc}</title></head>\n"
+        f"<body>{header}{str(soup)}</body>\n"
+        "</html>"
+    )
+    return {
+        "idx": idx,
+        "item": item,
+        "href": "article.html" if single else f"article_{idx}.html",
+        "html": html,
+        "images": images,
+        # uncompressed byte cost; an upper bound on what this article adds to the zip
+        "size": len(html.encode("utf-8")) + sum(len(data) for _, data, _ in images),
+    }
+
+
+def _zip_epub(rendered, failures, *, title=None, subtitle=None, single=False):
+    "Assemble already-rendered articles into the bytes of one epub file."
     output_buffer = io.BytesIO()
     with zipfile.ZipFile(output_buffer, "w") as zip:
         # mimetype must be first and uncompressed per https://www.w3.org/TR/epub-33/#sec-zip-container-mime
@@ -253,31 +271,19 @@ def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
 
         # Cover and TOC nav only make sense for digests.
         if not single:
-            cover_html = _build_cover_html(title or "feedi digest", subtitle, len(successes))
+            cover_html = _build_cover_html(title or "feedi digest", subtitle, len(rendered))
             zip.writestr("cover.xhtml", cover_html, compress_type=zipfile.ZIP_DEFLATED)
             manifest_items.append('<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>')
             spine_items.append('<itemref idref="cover"/>')
 
-        for idx, item in enumerate(successes, start=1):
-            art = item["article"]
-            item_url = item.get("url") or ""
-            header = _article_header_html(art, item_url) if not single else ""
-            soup = BeautifulSoup(art.get("content") or "", "lxml")
-            subdir = f"article_{idx}_files"
-            image_manifest += _localize_images(soup, zip, subdir)
-            title_for_doc = xml_escape(art.get("title") or item_url or "Untitled")
-            html = (
-                '<?xml version="1.0" encoding="UTF-8"?>\n'
-                "<!DOCTYPE html>\n"
-                '<html xmlns="http://www.w3.org/1999/xhtml">\n'
-                f"<head><title>{title_for_doc}</title></head>\n"
-                f"<body>{header}{str(soup)}</body>\n"
-                "</html>"
-            )
+        for doc in rendered:
+            idx = doc["idx"]
+            for img_filename, data, media_type in doc["images"]:
+                zip.writestr(img_filename, data, compress_type=zipfile.ZIP_DEFLATED)
+                image_manifest.append((img_filename, media_type))
 
-            href = "article.html" if single else f"article_{idx}.html"
-            zip.writestr(href, html, compress_type=zipfile.ZIP_DEFLATED)
-            manifest_items.append(f'<item id="article{idx}" href="{href}" media-type="application/xhtml+xml"/>')
+            zip.writestr(doc["href"], doc["html"], compress_type=zipfile.ZIP_DEFLATED)
+            manifest_items.append(f'<item id="article{idx}" href="{doc["href"]}" media-type="application/xhtml+xml"/>')
             spine_items.append(f'<itemref idref="article{idx}"/>')
 
         if failures:
@@ -291,7 +297,7 @@ def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
             manifest_items.append(f'<item id="{safe_id}" href="{xml_escape(img_path)}" media-type="{media_type}"/>')
 
         if single:
-            first = successes[0]
+            first = rendered[0]["item"]
             doc_title = first["article"].get("title") or first.get("url") or "Untitled"
             doc_author = _resolve_author(first.get("url") or "", first["article"])
             doc_lang = first["article"].get("lang") or ""
@@ -301,7 +307,7 @@ def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
             doc_author = "feedi"
             doc_lang = "en"
             doc_date = ""
-            nav_html = _build_nav_html(doc_title, successes)
+            nav_html = _build_nav_html(doc_title, rendered)
             zip.writestr("nav.xhtml", nav_html, compress_type=zipfile.ZIP_DEFLATED)
             manifest_items.append(
                 '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
@@ -327,6 +333,89 @@ def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
     return output_buffer.getvalue()
 
 
+def package_epub(url_or_items, article=None, *, title=None, subtitle=None):
+    """
+    Build an EPUB containing one or more articles, returning the zipped bytes.
+
+    Backwards-compatible single-article call: `package_epub(url, article)`.
+    Digest call: `package_epub(items, title=..., subtitle=...)` where each item is
+        {"url": str, "article": readability-dict} for successes and
+        {"url": str, "error": str} for failed items (rendered as a final chapter).
+    """
+    if isinstance(url_or_items, str):
+        items = [{"url": url_or_items, "article": article}]
+        single = True
+    else:
+        items = list(url_or_items)
+        single = False
+
+    successes, failures = _split_items(items)
+    if not successes:
+        raise ValueError("package_epub needs at least one successfully extracted article")
+
+    rendered = [_render_article(it, idx, single=single) for idx, it in enumerate(successes, start=1)]
+    return _zip_epub(rendered, failures, title=title, subtitle=subtitle, single=single)
+
+
+# Room left for the epub container files (cover, nav, opf) on top of the article
+# payload when deciding where to cut a batch.
+EPUB_OVERHEAD_BYTES = 128 * 1024
+
+
+def package_epub_batches(items, *, title=None, subtitle=None, max_bytes):
+    """
+    Package a digest into as many epubs as it takes to keep each one under `max_bytes`,
+    so an oversized digest can go out as several emails instead of being rejected by the
+    mail server. Returns a list of {"data", "title", "count"} dicts, in reading order.
+
+    Articles (and their images) are fetched and rendered exactly once, then assembled
+    into batches, so splitting costs no extra network traffic. Failed extractions are
+    listed in the last batch.
+    """
+    items = list(items)
+    successes, failures = _split_items(items)
+    if not successes:
+        raise ValueError("package_epub_batches needs at least one successfully extracted article")
+
+    rendered = [_render_article(it, idx) for idx, it in enumerate(successes, start=1)]
+
+    # Greedy pack on uncompressed size, which over-estimates the zipped result and so
+    # only ever errs towards smaller batches.
+    budget = max(max_bytes - EPUB_OVERHEAD_BYTES, 1)
+    batches = []
+    current = []
+    current_size = 0
+    for doc in rendered:
+        if current and current_size + doc["size"] > budget:
+            batches.append(current)
+            current, current_size = [], 0
+        if not current and doc["size"] > budget:
+            logger.warning(
+                "digest: article %s is %d bytes on its own, over the %d byte limit",
+                doc["item"].get("url"),
+                doc["size"],
+                max_bytes,
+            )
+        current.append(doc)
+        current_size += doc["size"]
+    batches.append(current)
+
+    total = len(batches)
+    packaged = []
+    for number, batch in enumerate(batches, start=1):
+        base_title = title or "feedi digest"
+        batch_title = base_title if total == 1 else f"{base_title} ({number}/{total})"
+        data = _zip_epub(
+            batch,
+            failures if number == total else [],
+            title=batch_title,
+            subtitle=subtitle,
+        )
+        packaged.append({"data": data, "title": batch_title, "count": len(batch)})
+
+    return packaged
+
+
 def _build_cover_html(title, subtitle, count):
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -343,11 +432,12 @@ def _build_cover_html(title, subtitle, count):
     return "\n".join(parts)
 
 
-def _build_nav_html(title, successes):
+def _build_nav_html(title, rendered):
     lis = []
-    for idx, item in enumerate(successes, start=1):
-        art_title = item["article"].get("title") or item.get("url") or f"Article {idx}"
-        lis.append(f'<li><a href="article_{idx}.html">{xml_escape(art_title)}</a></li>')
+    for doc in rendered:
+        item = doc["item"]
+        art_title = item["article"].get("title") or item.get("url") or f"Article {doc['idx']}"
+        lis.append(f'<li><a href="{doc["href"]}">{xml_escape(art_title)}</a></li>')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<!DOCTYPE html>\n"

@@ -625,6 +625,113 @@ def test_package_epub_multi_article_structure():
         ET.fromstring(z.read("content.opf"))
 
 
+def _big_article(title, body_bytes):
+    article = _make_fake_article(title)
+    article["content"] = "<p>" + ("x" * body_bytes) + "</p>"
+    return article
+
+
+def test_package_epub_batches_splits_when_over_limit():
+    from feedi.scraping import EPUB_OVERHEAD_BYTES, package_epub_batches
+
+    # Three articles of ~40KB each against a budget that only fits one at a time.
+    items = [{"url": f"http://a.example.com/{i}", "article": _big_article(f"Article {i}", 40_000)} for i in range(1, 4)]
+    items.append({"url": "http://broken.example.com/x", "error": "RequestException"})
+
+    batches = package_epub_batches(
+        items, title="feedi digest", subtitle="Favorites", max_bytes=EPUB_OVERHEAD_BYTES + 60_000
+    )
+
+    assert len(batches) == 3
+    assert [b["count"] for b in batches] == [1, 1, 1]
+    assert [b["title"] for b in batches] == [
+        "feedi digest (1/3)",
+        "feedi digest (2/3)",
+        "feedi digest (3/3)",
+    ]
+
+    seen_articles = []
+    for number, batch in enumerate(batches, start=1):
+        with zipfile.ZipFile(io.BytesIO(batch["data"])) as z:
+            names = set(z.namelist())
+            article_files = sorted(n for n in names if n.startswith("article_"))
+            seen_articles += article_files
+            assert "cover.xhtml" in names
+            assert "nav.xhtml" in names
+            # every nav link must resolve inside its own epub
+            nav = z.read("nav.xhtml").decode()
+            for name in article_files:
+                assert f'href="{name}"' in nav
+            # failed extractions are listed once, in the last part
+            assert ("failures.xhtml" in names) == (number == len(batches))
+            ET.fromstring(z.read("content.opf").decode())
+
+    # each article appears exactly once across the batches, under a unique name
+    assert sorted(seen_articles) == ["article_1.html", "article_2.html", "article_3.html"]
+
+
+def test_package_epub_batches_single_batch_when_under_limit():
+    from feedi.scraping import package_epub_batches
+
+    items = [{"url": "http://a.example.com/1", "article": _make_fake_article("Article One")}]
+    batches = package_epub_batches(items, title="feedi digest", subtitle="Favorites", max_bytes=16 * 1024 * 1024)
+
+    assert len(batches) == 1
+    # no "(1/1)" suffix when it all fits in one email
+    assert batches[0]["title"] == "feedi digest"
+
+
+def test_digest_splits_into_several_emails(client, app, monkeypatch):
+    import feedi.email
+    import feedi.scraping
+    import feedi.tasks
+    from feedi.models import User, db
+
+    response, _feed_id = create_feed(
+        client,
+        "big-feed.com",
+        [
+            {"title": "bg-1", "date": "2024-01-01 00:00Z"},
+            {"title": "bg-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+    for eid in entry_ids[:2]:
+        client.put(f"/favorites/{eid}")
+
+    user_id = _set_kindle_email(app, "user@kindle.com")
+
+    def fake_extract(url=None, html=None):
+        return _big_article(url or "fake", 40_000)
+
+    sent = []
+
+    def fake_send(recipient, attach_data, filename):
+        sent.append({"recipient": recipient, "filename": filename, "bytes": attach_data})
+
+    monkeypatch.setattr(feedi.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.email, "send", fake_send)
+    monkeypatch.setattr(feedi.tasks.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.tasks.email, "send", fake_send)
+    app.config["MAX_ATTACHMENT_BYTES"] = feedi.scraping.EPUB_OVERHEAD_BYTES + 60_000
+    feedi.tasks.app.config["MAX_ATTACHMENT_BYTES"] = app.config["MAX_ATTACHMENT_BYTES"]
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "favorited").get()
+
+        status = json.loads(db.session.get(User, user_id).last_digest_status)
+        assert status["state"] == "ok"
+        assert status["sent_count"] == 2
+        assert status["parts"] == 2
+
+    assert len(sent) == 2
+    assert sent[0]["filename"].endswith("(1/2)")
+    assert sent[1]["filename"].endswith("(2/2)")
+    for s in sent:
+        assert s["recipient"] == "user@kindle.com"
+        assert len(s["bytes"]) <= app.config["MAX_ATTACHMENT_BYTES"]
+
+
 def test_safe_get_rejects_loopback(app):
     from feedi.requests import UnsafeURLError, safe_get
 

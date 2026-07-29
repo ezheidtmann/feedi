@@ -15,6 +15,11 @@ RSS_MINIMUM_ENTRY_AMOUNT = 10
 # This affects the sqlalchemy engine pool size
 HUEY_POOL_SIZE = 100
 
+# Biggest epub attachment to put in a single digest email; bigger digests are split
+# across several emails. Gmail rejects messages over 25MB, and base64 inflates the
+# attachment by 4/3 on the way out, so the raw ceiling is ~18MB. Leave some headroom.
+MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
 # username to use internally when authentication is "disabled"
 # this user will be inserted automatically when first creating the DB
 # and auto-logged-in when a browser first sends a request to the app.

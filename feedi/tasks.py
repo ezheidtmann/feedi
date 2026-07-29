@@ -127,6 +127,7 @@ def build_and_send_digest(user_id, source):
         started_at=now.isoformat(),
         finished_at=None,
         sent_count=0,
+        parts=0,
         failed=[],
         error=None,
     )
@@ -176,8 +177,19 @@ def build_and_send_digest(user_id, source):
         today = datetime.date.today().isoformat()
         source_title = DIGEST_SOURCE_TITLES.get(source, source)
         title = f"feedi digest — {source_title} — {today}"
-        attach_data = scraping.package_epub(items, title=title, subtitle=source_title)
-        email.send(user.kindle_email, attach_data, filename=title)
+
+        # A large digest won't fit in one email, so it goes out as several numbered epubs.
+        batches = scraping.package_epub_batches(
+            items,
+            title=title,
+            subtitle=source_title,
+            max_bytes=app.config["MAX_ATTACHMENT_BYTES"],
+        )
+        for batch in batches:
+            app.logger.info(
+                "digest: sending %s (%d articles, %d bytes)", batch["title"], batch["count"], len(batch["data"])
+            )
+            email.send(user.kindle_email, batch["data"], filename=batch["title"])
 
         # only clear the queue once email actually succeeded
         if source == "queued" and included_entry_ids:
@@ -190,6 +202,7 @@ def build_and_send_digest(user_id, source):
             state="ok",
             finished_at=datetime.datetime.utcnow().isoformat(),
             sent_count=len(successes),
+            parts=len(batches),
             failed=failed,
         )
     except Exception as e:

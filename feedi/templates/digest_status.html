@@ -10,7 +10,7 @@
 <div class="notification is-success is-light"
      _="on load wait 6s then remove me">
   <button class="delete" _="on click remove the closest .notification"></button>
-  Digest sent: {{ status.sent_count or 0 }} article{% if (status.sent_count or 0) != 1 %}s{% endif %}.
+  Digest sent: {{ status.sent_count or 0 }} article{% if (status.sent_count or 0) != 1 %}s{% endif %}{% if (status.parts or 1) > 1 %} in {{ status.parts }} emails{% endif %}.
   {% if status.failed %}({{ status.failed | length }} skipped){% endif %}
 </div>
 {% elif status.state == "failed" %}
