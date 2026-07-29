@@ -482,6 +482,10 @@ class Entry(db.Model):
         Return all entries belonging to the given digest source (favorited/pinned/queued)
         ordered newest-first by sort_date, with content_full eagerly loaded so the digest
         task doesn't trigger N+1 lazy loads.
+
+        Entries already sent to the kindle are skipped, so consecutive digests don't
+        resend the same articles. An entry that was re-marked after its last send
+        (e.g. re-favorited or re-queued) is included again.
         """
         if source not in cls.DIGEST_SOURCES:
             raise ValueError(f"unknown digest source: {source!r}")
@@ -490,7 +494,11 @@ class Entry(db.Model):
         query = (
             db.select(cls)
             .filter_by(user_id=user_id)
-            .filter(column.is_not(None), cls.content_url.is_not(None))
+            .filter(
+                column.is_not(None),
+                cls.content_url.is_not(None),
+                cls.sent_to_kindle.is_(None) | (column > cls.sent_to_kindle),
+            )
             .order_by(cls.sort_date.desc())
             .options(sa.orm.undefer(cls.content_full))
         )

@@ -506,6 +506,60 @@ def test_digest_partial_failure(client, app, monkeypatch):
     assert len(sent) == 1
 
 
+def test_digest_skips_already_sent_entries(client, app, monkeypatch):
+    import feedi.tasks
+    from feedi.models import Entry, db
+
+    response, _feed_id = create_feed(
+        client,
+        "resend-feed.com",
+        [
+            {"title": "re-1", "date": "2024-01-01 00:00Z"},
+            {"title": "re-2", "date": "2024-01-02 00:00Z"},
+        ],
+    )
+    entry_ids = extract_entry_ids(response)
+    for eid in entry_ids[:2]:
+        client.put(f"/favorites/{eid}")
+
+    user_id = _set_kindle_email(app, "user@kindle.com")
+
+    extracted = []
+
+    def fake_extract(url=None, html=None):
+        extracted.append(url)
+        return _make_fake_article(url or "fake")
+
+    sent = []
+
+    def fake_send(recipient, attach_data, filename):
+        sent.append(attach_data)
+
+    monkeypatch.setattr(feedi.tasks.scraping, "extract", fake_extract)
+    monkeypatch.setattr(feedi.tasks.email, "send", fake_send)
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "favorited").get()
+        assert len(extracted) == 2
+
+        # favorites are still favorited, but a second digest has nothing new to send
+        feedi.tasks.build_and_send_digest(user_id, "favorited").get()
+        assert len(extracted) == 2
+        assert len(sent) == 1
+
+    # re-favoriting after the send makes the entry eligible again
+    client.put(f"/favorites/{entry_ids[0]}")  # unfavorite
+    client.put(f"/favorites/{entry_ids[0]}")  # favorite again
+
+    with app.app_context():
+        feedi.tasks.build_and_send_digest(user_id, "favorited").get()
+        assert len(extracted) == 3
+        assert len(sent) == 2
+
+        refavorited = db.session.get(Entry, entry_ids[0])
+        assert refavorited.sent_to_kindle > refavorited.favorited
+
+
 def test_digest_send_route_refuses_without_kindle_email(client):
     response = client.post("/entries/kindle/digest", data={"source": "queued"})
     assert response.status_code == 400

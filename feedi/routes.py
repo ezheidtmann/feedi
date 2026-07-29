@@ -468,7 +468,7 @@ def send_to_kindle():
 
     # save as read entry if not already, to keep track of sent to kindle urls
     entry = models.Entry.from_url(current_user.id, url)
-    entry.sent_to_kindle = datetime.datetime.now()
+    entry.sent_to_kindle = datetime.datetime.utcnow()
     entry.viewed = entry.viewed or datetime.datetime.utcnow()
     entry.content_full = article["content"]
 
