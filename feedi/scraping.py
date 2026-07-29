@@ -152,6 +152,83 @@ def _resolve_published(article):
     return published and published.date().isoformat()
 
 
+# Widest image a Kindle panel can actually show (a Paperwhite is 1236px across), so
+# anything wider is spending digest bytes on pixels the device throws away.
+MAX_IMAGE_WIDTH = 1236
+IMAGE_JPEG_QUALITY = 80
+
+# The raster formats a Kindle renders, and the media type to declare for each. Anything
+# else (avif, webp, …) has to be re-encoded or it shows up as a broken image.
+KINDLE_RASTER_FORMATS = {
+    "JPEG": ("jpg", "image/jpeg"),
+    "PNG": ("png", "image/png"),
+    "GIF": ("gif", "image/gif"),
+}
+
+
+def _flatten_for_jpeg(image):
+    "Drop to RGB for JPEG, compositing any transparency onto white rather than black."
+    if image.mode in ("RGBA", "LA", "P", "PA"):
+        image = image.convert("RGBA")
+        backdrop = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        return Image.alpha_composite(backdrop, image).convert("RGB")
+    return image.convert("RGB")
+
+
+def _prepare_image(data, url):
+    """
+    Normalise fetched image bytes into (extension, data, media-type) a Kindle can render:
+    formats it doesn't know become JPEG or PNG, anything wider than the panel is scaled
+    down to it, and the original bytes win whenever re-encoding them comes out bigger
+    (which it does for the screenshots and line art that compress badly as JPEG).
+
+    Returns None if the bytes aren't a usable image.
+    """
+    # SVG is a core EPUB media type and PIL can't read it, so pass it through as-is —
+    # the important part is declaring it honestly instead of as a .jpg.
+    if b"<svg" in data[:1024].lower():
+        return "svg", data, "image/svg+xml"
+
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception:
+        logger.warning("epub: could not decode image, dropping %s", url)
+        return None
+
+    candidates = []
+    source_format = (image.format or "").upper()
+    if source_format in KINDLE_RASTER_FORMATS and image.width <= MAX_IMAGE_WIDTH:
+        ext, media_type = KINDLE_RASTER_FORMATS[source_format]
+        candidates.append((len(data), ext, data, media_type))
+
+    resized = image
+    if image.width > MAX_IMAGE_WIDTH:
+        height = max(1, round(image.height * MAX_IMAGE_WIDTH / image.width))
+        resized = image.resize((MAX_IMAGE_WIDTH, height), Image.LANCZOS)
+
+    # Offer both encodings and keep the smaller: JPEG wins on photographs, PNG on the
+    # flat-colour diagrams and terminal screenshots that JPEG bloats.
+    for ext, media_type, converted, save_args in (
+        ("jpg", "image/jpeg", _flatten_for_jpeg, {"format": "JPEG", "quality": IMAGE_JPEG_QUALITY, "optimize": True}),
+        ("png", "image/png", lambda i: i, {"format": "PNG", "optimize": True}),
+    ):
+        try:
+            buffer = io.BytesIO()
+            converted(resized).save(buffer, **save_args)
+        except Exception:
+            logger.debug("epub: could not re-encode %s as %s", url, ext)
+            continue
+        candidates.append((buffer.tell(), ext, buffer.getvalue(), media_type))
+
+    if not candidates:
+        logger.warning("epub: no usable encoding for image %s", url)
+        return None
+
+    _size, ext, data, media_type = min(candidates, key=lambda candidate: candidate[0])
+    return ext, data, media_type
+
+
 def _localize_images(soup, subdir):
     """
     Walk every <img>, fetch it and rewrite the src to a local path under `subdir/`.
@@ -159,26 +236,15 @@ def _localize_images(soup, subdir):
     Filenames are hashed to avoid collisions when two source URLs share a basename.
     """
     written = []
-    seen = set()
-    for img in soup.findAll("img"):
+    local_paths = {}
+    for img in soup.find_all("img"):
         img_url = img.get("src")
         if not img_url:
             continue
 
-        digest = hashlib.sha1(img_url.encode("utf-8")).hexdigest()[:10]
-        ext = img_url.split("?")[0].rsplit(".", 1)[-1].lower()
-        if ext not in ("jpg", "jpeg", "png", "gif", "webp"):
-            ext = "jpg"
-        is_webp = ext == "webp"
-        if is_webp:
-            ext = "jpg"
-        img_filename = f"{subdir}/{digest}.{ext}"
-
-        img["src"] = img_filename
-
-        if img_filename in seen:
+        if img_url in local_paths:
+            img["src"] = local_paths[img_url]
             continue
-        seen.add(img_filename)
 
         try:
             response = safe_get(img_url, timeout=TIMEOUT_SLOWER)
@@ -188,18 +254,16 @@ def _localize_images(soup, subdir):
             logger.exception("error fetching image during epub generation: %s", img_url)
             continue
 
-        try:
-            if is_webp:
-                buffer = io.BytesIO()
-                Image.open(io.BytesIO(response.content)).convert("RGB").save(buffer, "JPEG")
-                data = buffer.getvalue()
-            else:
-                data = response.content
-        except Exception:
-            logger.exception("error converting image for epub: %s", img_url)
+        prepared = _prepare_image(response.content, img_url)
+        if not prepared:
             continue
 
-        media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+        # The extension depends on how the image came out, so the src is only rewritten
+        # once that's known; an image we couldn't localize keeps its remote url rather
+        # than pointing at a file that was never written.
+        ext, data, media_type = prepared
+        img_filename = f"{subdir}/{hashlib.sha1(img_url.encode('utf-8')).hexdigest()[:10]}.{ext}"
+        img["src"] = local_paths[img_url] = img_filename
         written.append((img_filename, data, media_type))
     return written
 

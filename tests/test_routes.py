@@ -3,7 +3,10 @@ import io
 import json
 import re
 import zipfile
+from unittest import mock
 from xml.etree import ElementTree as ET
+
+from requests.exceptions import RequestException
 
 from tests.conftest import create_feed, extract_entry_ids, mock_feed, mock_request
 
@@ -569,6 +572,101 @@ def test_digest_send_route_rejects_unknown_source(client, app):
     _set_kindle_email(app, "user@kindle.com")
     response = client.post("/entries/kindle/digest", data={"source": "bogus"})
     assert response.status_code == 400
+
+
+def _encode_image(fmt, size=(40, 30), colour=(200, 30, 30), mode="RGB"):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new(mode, size, colour).save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def test_prepare_image_converts_formats_the_kindle_cant_render():
+    from feedi.scraping import _prepare_image
+
+    # avif and webp must not reach the device declared as something they aren't
+    for fmt in ("AVIF", "WEBP"):
+        ext, data, media_type = _prepare_image(_encode_image(fmt), f"http://e.com/x.{fmt.lower()}")
+        assert ext in ("jpg", "png"), fmt
+        assert media_type in ("image/jpeg", "image/png"), fmt
+        assert data[:4] not in (b"RIFF",), f"{fmt} bytes passed through unconverted"
+
+
+def test_prepare_image_declares_svg_honestly():
+    from feedi.scraping import _prepare_image
+
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'
+    ext, data, media_type = _prepare_image(svg, "http://e.com/d.svg")
+
+    # previously stored as .jpg / image/jpeg, which no reader can make sense of
+    assert (ext, media_type) == ("svg", "image/svg+xml")
+    assert data == svg
+
+
+def test_prepare_image_downscales_to_the_panel_width():
+    import io as _io
+
+    from PIL import Image
+
+    from feedi.scraping import MAX_IMAGE_WIDTH, _prepare_image
+
+    wide = _encode_image("PNG", size=(MAX_IMAGE_WIDTH * 2, 400))
+    _ext, data, _media_type = _prepare_image(wide, "http://e.com/wide.png")
+
+    assert Image.open(_io.BytesIO(data)).width == MAX_IMAGE_WIDTH
+
+
+def test_prepare_image_keeps_the_original_when_re_encoding_would_grow_it():
+    from feedi.scraping import _prepare_image
+
+    # a small flat-colour png is already about as small as it gets; a jpeg of it is bigger
+    original = _encode_image("PNG", size=(200, 200))
+    _ext, data, media_type = _prepare_image(original, "http://e.com/flat.png")
+
+    assert len(data) <= len(original)
+    assert media_type == "image/png"
+
+
+def test_prepare_image_drops_undecodable_bytes():
+    from feedi.scraping import _prepare_image
+
+    assert _prepare_image(b"this is not an image at all", "http://e.com/nope.jpg") is None
+
+
+def test_localize_images_leaves_unfetchable_images_pointing_at_their_source():
+    from bs4 import BeautifulSoup
+
+    from feedi.scraping import _localize_images
+
+    soup = BeautifulSoup('<p><img src="http://e.com/gone.png"/></p>', "lxml")
+    with mock.patch("feedi.scraping.safe_get", side_effect=RequestException("boom")):
+        written = _localize_images(soup, "article_1_files")
+
+    # a dangling local path would render as a broken image; the remote url at least works
+    # for anything with a network connection
+    assert written == []
+    assert soup.find("img")["src"] == "http://e.com/gone.png"
+
+
+def test_localize_images_writes_a_shared_image_once():
+    from bs4 import BeautifulSoup
+
+    from feedi.scraping import _localize_images
+
+    png = _encode_image("PNG")
+    soup = BeautifulSoup(
+        '<p><img src="http://e.com/same.png"/><img src="http://e.com/same.png"/></p>',
+        "lxml",
+    )
+    response = mock.Mock(ok=True, content=png)
+    with mock.patch("feedi.scraping.safe_get", return_value=response) as fetch:
+        written = _localize_images(soup, "article_1_files")
+
+    assert fetch.call_count == 1
+    assert len(written) == 1
+    srcs = [img["src"] for img in soup.find_all("img")]
+    assert srcs == [written[0][0], written[0][0]]
 
 
 def test_package_epub_xml_safe_with_special_chars():
