@@ -409,33 +409,40 @@ def entry_view(id):
     if entry.user_id != current_user.id:
         flask.abort(404)
 
-    # When requested through htmx (ajax), this page loads layout first, then the content
-    # on a separate request. The reason for this is that article fetching is slow, and we
-    # don't want the view entry action to freeze the UI without loading indication.
-    # Now, the reason for that freezing is that we are using hx-boosting instead of default
-    # browser behavior. I don't like it, but I couldn't figure out how to preserve the feed
-    # page/scrolling position on back button unless I jump to view content via htmx
+    if not entry.content_url and not entry.target_url:
+        # this view can't work if no entry or content url
+        return "Entry not readable", 400
 
-    if "HX-Request" in flask.request.headers and "content" not in flask.request.args and not entry.content_full:
-        # if ajax/htmx just load the empty UI and load content asynchronously
-        return flask.render_template("entry_content.html", entry=entry, content=None)
-    else:
-        if not entry.content_url and not entry.target_url:
-            # this view can't work if no entry or content url
-            return "Entry not readable", 400
+    if not entry.content_url:
+        return redirect_response(entry.target_url)
 
+    # Article scraping is slow, so unless the content is already stored we render the
+    # reader layout first and pull the content in with a second (htmx) request, to avoid
+    # a multi second wait with no feedback. Note this is a regular browser navigation and
+    # not an ajax swap: that's what lets the browser restore the feed --dom and scroll
+    # position included-- from its back/forward cache when going back.
+    if "content" not in flask.request.args and not entry.content_full:
         # if it's a video site, just redirect. TODO add more sites
         if "youtube.com" in entry.content_url or "vimeo.com" in entry.content_url:
             return redirect_response(entry.target_url)
 
-        # if full browser load or explicit content request, fetch the article synchronously
-        entry.fetch_content()
-        if entry.content_full:
-            entry.viewed = entry.viewed or datetime.datetime.utcnow()
-            db.session.commit()
-            return flask.render_template("entry_content.html", entry=entry, content=entry.content_full)
+        return flask.render_template("entry_content.html", entry=entry, content=None)
 
-        return redirect_response(entry.target_url)
+    entry.fetch_content()
+    if entry.content_full:
+        entry.viewed = entry.viewed or datetime.datetime.utcnow()
+        db.session.commit()
+        return flask.render_template("entry_content.html", entry=entry, content=entry.content_full)
+
+    # content couldn't be extracted, fall back to reading it at the source
+    source_url = entry.target_url or entry.content_url
+    if "HX-Request" in flask.request.headers:
+        # the reader is already in the browser history at this point, so send the client
+        # to the source with a location replace, otherwise going back would land on this
+        # view again and immediately bounce forward.
+        return flask.render_template("entry_redirect.html", url=source_url)
+
+    return redirect_response(source_url)
 
 
 def redirect_response(url):

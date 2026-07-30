@@ -1,0 +1,9 @@
+{# Swapped into the reader when the article content couldn't be extracted.
+   Replaces the reader in the history so the back button goes to the feed. #}
+<div class="content entry-content">
+    <script>window.location.replace({{ url | tojson }});</script>
+    <p>
+        This article couldn't be read here.
+        <a href="{{ url }}">Open it at the source</a>.
+    </p>
+</div>

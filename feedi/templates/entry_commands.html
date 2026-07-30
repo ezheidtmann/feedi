@@ -11,7 +11,6 @@
 {% endif %} {% if entry.content_url and entry.id and request.path !=
 url_for('entry_view', id=entry.id) %}
 <a
-  hx-boost="true"
   href="{{ url_for('entry_view', id=entry.id) }}"
   class="dropdown-item"
   ><span class="icon"><i class="fas fa-book-reader"></i></span> View in

@@ -48,11 +48,7 @@
                      {% endif %}
                      <div class="column {% if entry.content_url %}is-clickable{% endif %}"
                           {% if entry.content_url %}
-                          hx-get="{{ url_for('entry_view', id=entry.id) }}"
-                          hx-trigger="click"
-                          hx-target="body"
-                          hx-push-url="true"
-                          hx-swap="innerHTML show:top"
+                          _="on click go to url '{{ url_for('entry_view', id=entry.id) }}'"
                           {% endif %}>
                          <div class="content" tabindex="-1">
                            {{ entry.content_short | sanitize | safe | default("[click to read]", true) }}

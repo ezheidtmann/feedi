@@ -115,6 +115,9 @@
             <button class="button is-loading is-large is-centered " style="border: none;">
             Button
             </button>
+            <noscript>
+                <a href="{{ url_for('entry_view', id=entry.id, content='true') }}">Load the article</a>
+            </noscript>
         </div>
         {% endif %}
     </div>

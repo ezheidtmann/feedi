@@ -26,12 +26,16 @@
   {% endif %}
 </div>
 {% endif %}
-<div hx-boost="true">
+{# no hx-boost here: navigating away from the feed with a regular browser request is
+   what allows the browser to restore this page from its back/forward cache. #}
+<div data-feed-scroll>
   {% with entries = pinned, next_page = None, is_pinned_list = True%}
     <div id="pinned-entry-list">
         {% include "entry_list_page.html" %}
     </div>
   {% endwith %}
+  <div id="main-entry-list">
     {% include "entry_list_page.html" %}
+  </div>
 </div>
 {% endblock %}

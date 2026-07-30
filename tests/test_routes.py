@@ -308,10 +308,56 @@ def test_view_entry_content(client):
     assert "reclaiming-the-web" in response.text
     assert "short content" in response.text
     entry_url = re.search(r"/entries/(\d+)", response.text).group(0)
-    response = client.get(entry_url)
 
+    # the reader layout is rendered first, the article content is pulled in a second request
+    response = client.get(entry_url)
+    assert "reclaiming-the-web" in response.text
+    assert "I had some ideas of what I wanted" not in response.text
+
+    response = client.get(entry_url, query_string={"content": "true"})
+    assert "I had some ideas of what I wanted" in response.text
+
+    # once the content is stored it's included in the first response
+    response = client.get(entry_url)
     assert "reclaiming-the-web" in response.text
     assert "I had some ideas of what I wanted" in response.text
+
+
+def test_view_entry_opens_as_a_regular_navigation(client):
+    """
+    Entries are opened with a plain browser navigation instead of an htmx swap of the
+    body, which is what allows the browser to restore the feed from its back/forward
+    cache --dom and scroll position included-- when going back to it.
+    """
+    response, _ = create_feed(client, "olano.dev", [{"title": "an-article", "date": "2023-12-12T00:00:00-03:00"}])
+    entry_id = extract_entry_ids(response)[0]
+    entry_url = f"/entries/{entry_id}"
+
+    assert 'hx-push-url="true"' not in response.text
+    assert f"go to url '{entry_url}'" in response.text
+
+    # hooks used to restore the scroll position when the bfcache misses
+    assert "data-feed-scroll" in response.text
+    assert 'id="main-entry-list"' in response.text
+
+
+def test_view_entry_without_readable_content(client):
+    "When the article can't be extracted the reader sends the browser to the source."
+    response, _ = create_feed(client, "olano.dev", [{"title": "an-article", "date": "2023-12-12T00:00:00-03:00"}])
+    entry_url = re.search(r"/entries/(\d+)", response.text).group(0)
+
+    with mock.patch("feedi.models.Entry.fetch_content"):
+        # a regular request can still be redirected by the server
+        response = client.get(entry_url, query_string={"content": "true"})
+        assert response.status_code == 302
+        assert response.headers["Location"] == "http://olano.dev/an-article"
+
+        # the htmx one can't: the reader is already in the history, so it's replaced
+        # rather than pushed, otherwise going back would bounce forward again
+        response = client.get(entry_url, query_string={"content": "true"}, headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert "HX-Redirect" not in response.headers
+        assert 'window.location.replace("http://olano.dev/an-article")' in response.text
 
 
 def test_add_external_entry(client):
@@ -324,6 +370,9 @@ def test_add_external_entry(client):
     response = client.post("/entries/", query_string={"url": content_url, "redirect": 1}, follow_redirects=True)
     assert response.status_code == 200
     assert "reclaiming-the-web" in response.text
+
+    # the article itself is loaded by the reader in a second request
+    response = client.get(response.request.path, query_string={"content": "true"})
     assert "I had some ideas of what I wanted" in response.text
 
     # add same url again, verify that redirected entry url is the same as before
