@@ -334,11 +334,8 @@ def test_view_entry_opens_as_a_regular_navigation(client):
     entry_url = f"/entries/{entry_id}"
 
     assert 'hx-push-url="true"' not in response.text
+    assert "hx-boost" not in response.text
     assert f"go to url '{entry_url}'" in response.text
-
-    # hooks used to restore the scroll position when the bfcache misses
-    assert "data-feed-scroll" in response.text
-    assert 'id="main-entry-list"' in response.text
 
 
 def test_view_entry_without_readable_content(client):
