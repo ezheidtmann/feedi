@@ -120,7 +120,16 @@ def extract(url=None, html=None):
     LAZY_DATA_ATTRS = ["data-src", "data-lazy-src", "data-td-src-property", "data-srcset"]
     for data_attr in LAZY_DATA_ATTRS:
         for img in soup.findAll("img", attrs={data_attr: True}):
-            img.attrs = {"src": img[data_attr]}
+            src = img[data_attr]
+            if data_attr.endswith("srcset"):
+                # a srcset is a list of candidates ("a.jpg 400w, b.jpg 800w"), not a url:
+                # putting it in src verbatim would show a broken image
+                src = src.split(",")[0].strip().split(" ")[0]
+
+            attrs = {"src": src}
+            if img.get("alt"):
+                attrs["alt"] = img["alt"]
+            img.attrs = attrs
 
     # prevent video iframes to force dimensions
     for iframe in soup.findAll("iframe", height=True):

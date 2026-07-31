@@ -1,6 +1,6 @@
 {
   "dependencies": {
     "@mozilla/readability": "mozilla/readability#main",
-    "jsdom": "^22.1.0"
+    "jsdom": "^26.1.0"
   }
 }
