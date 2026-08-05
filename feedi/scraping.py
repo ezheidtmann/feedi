@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import io
 import json
@@ -8,14 +9,13 @@ import zipfile
 from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import quoteattr
 
-import dateparser
-
 # use internal module to access unexported .tags function
 import favicon.favicon as favicon
 from bs4 import BeautifulSoup
 from PIL import Image
 from requests.exceptions import RequestException
 
+from feedi import article_clean, dates, site_rules
 from feedi.requests import TIMEOUT_SLOWER, USER_AGENT, requests, safe_get
 
 logger = logging.getLogger(__name__)
@@ -99,20 +99,63 @@ def make_absolute(url, path):
     return path
 
 
+def _readability(html, url):
+    "Run the readability subprocess over some html. Returns a possibly empty article dict."
+    r = subprocess.run(["feedi/extract_article.js", "--stdin", url], input=html, capture_output=True, check=True)
+    return json.loads(r.stdout) or {}
+
+
+def _extract_fallback(source_html, url):
+    """
+    Try to recover an article readability came back empty on.
+
+    Two causes account for most of them, and neither means the text is missing: a page
+    that hides its own server-rendered shell until hydration (readability drops hidden
+    nodes, then has nothing to score), and a client-rendered page that ships the post only
+    as structured data. Both are recoverable without a headless browser.
+    """
+    soup = BeautifulSoup(source_html, "lxml")
+    if article_clean.unhide_wrapper(soup):
+        article = _readability(str(soup).encode(), url)
+        if (article.get("content") or "").strip():
+            logger.debug("recovered %s by unhiding its wrapper", url)
+            return article
+
+    content = article_clean.content_from_metadata(source_html)
+    if content:
+        logger.debug("falling back to page metadata for %s", url)
+        return {"content": content, "title": None, "byline": None, "publishedTime": None}
+
+    return None
+
+
 # TODO this should be renamed, and maybe other things in this modules, using extract too much
 def extract(url=None, html=None):
     # The mozilla/readability npm package shows better results at extracting the
     # article content than all the python libraries I've tried... even than the readabilipy
     # one, which is a wrapper of it. so resorting to running a node.js script on a subprocess
     # for parsing the article sadly this adds a dependency to node and a few npm pacakges
+    rule = site_rules.for_url(url)
+
     if url:
-        html = safe_get(url, timeout=TIMEOUT_SLOWER).content
+        url = rule.rewrite(url) if rule else url
+        html = safe_get(url, timeout=TIMEOUT_SLOWER, headers=rule.headers() if rule else None).content
     elif not html:
         raise ValueError("Expected either url or html")
 
-    r = subprocess.run(["feedi/extract_article.js", "--stdin", url], input=html, capture_output=True, check=True)
+    source = html
 
-    article = json.loads(r.stdout)
+    # drop navigation, sidebars and footers before readability scores the page: when a
+    # site puts all of them in the same container as the article, they come along for the
+    # ride and end up rendered as article text in the reader
+    html = article_clean.clean_source(html, rule)
+
+    article = _readability(html, url)
+
+    if not (article.get("content") or "").strip():
+        article = _extract_fallback(source, url) or article
+
+    article["content"] = article_clean.clean_article(article.get("content"))
 
     # load lazy images by replacing putting the data-src into src and stripping other attrs
     soup = BeautifulSoup(article["content"], "lxml")
@@ -137,6 +180,11 @@ def extract(url=None, html=None):
 
     article["content"] = str(soup)
 
+    # readability only checks JSON-LD and a couple of meta tags, so plenty of articles
+    # come back from it undated. Take a second pass over the same html before dropping it.
+    published = dates.resolve(article.get("publishedTime"), html, url)
+    article["publishedTime"] = published.isoformat() if published else None
+
     return article
 
 
@@ -155,10 +203,18 @@ def _resolve_author(url, article):
     return author
 
 
-def _resolve_published(article):
-    published = article.get("publishedTime") or ""
-    published = published and dateparser.parse(published)
-    return published and published.date().isoformat()
+def _resolve_published(article, fallback=None):
+    """
+    The publication date to show for an article, as a datetime. `fallback` is the date the
+    entry's feed reported, used when the page itself doesn't say (it's the publisher's own
+    date, so it beats showing nothing).
+    """
+    return dates.parse(article.get("publishedTime")) or dates.parse(fallback)
+
+
+def _format_published(published):
+    "Format a publication date for a reader, e.g. 'May 12, 2024'."
+    return f"{published:%B} {published.day}, {published.year}"
 
 
 # Widest image a Kindle panel can actually show (a Paperwhite is 1236px across), so
@@ -277,15 +333,14 @@ def _localize_images(soup, subdir):
     return written
 
 
-def _article_header_html(article, url):
+def _article_header_html(article, url, published=None):
     title = xml_escape(article.get("title") or url or "Untitled")
     parts = [f"<h1>{title}</h1>"]
     byline = article.get("byline") or article.get("siteName")
     if byline:
         parts.append(f"<p><em>{xml_escape(byline)}</em></p>")
-    published = _resolve_published(article)
     if published:
-        parts.append(f"<p><small>{xml_escape(published)}</small></p>")
+        parts.append(f"<p><small>{xml_escape(_format_published(published))}</small></p>")
     if url:
         parts.append(f"<p><small><a href={quoteattr(url)}>{xml_escape(url)}</a></small></p>")
     parts.append("<hr/>")
@@ -312,7 +367,8 @@ def _render_article(item, idx, single=False):
     """
     art = item["article"]
     item_url = item.get("url") or ""
-    header = "" if single else _article_header_html(art, item_url)
+    published = _resolve_published(art, item.get("entry_date"))
+    header = "" if single else _article_header_html(art, item_url, published)
     soup = BeautifulSoup(art.get("content") or "", "lxml")
     images = _localize_images(soup, f"article_{idx}_files")
     title_for_doc = xml_escape(art.get("title") or item_url or "Untitled")
@@ -327,6 +383,7 @@ def _render_article(item, idx, single=False):
     return {
         "idx": idx,
         "item": item,
+        "published": published,
         "href": "article.html" if single else f"article_{idx}.html",
         "html": html,
         "images": images,
@@ -385,12 +442,14 @@ def _zip_epub(rendered, failures, *, title=None, subtitle=None, single=False):
             doc_title = first["article"].get("title") or first.get("url") or "Untitled"
             doc_author = _resolve_author(first.get("url") or "", first["article"])
             doc_lang = first["article"].get("lang") or ""
-            doc_date = _resolve_published(first["article"]) or ""
+            published = rendered[0]["published"]
+            doc_date = published.date().isoformat() if published else ""
         else:
             doc_title = title or "feedi digest"
             doc_author = "feedi"
             doc_lang = "en"
-            doc_date = ""
+            # the digest is dated by when it was put together, not by any one article
+            doc_date = datetime.date.today().isoformat()
             nav_html = _build_nav_html(doc_title, rendered)
             zip.writestr("nav.xhtml", nav_html, compress_type=zipfile.ZIP_DEFLATED)
             manifest_items.append(
@@ -531,7 +590,10 @@ def _build_nav_html(title, rendered):
     for doc in rendered:
         item = doc["item"]
         art_title = item["article"].get("title") or item.get("url") or f"Article {doc['idx']}"
-        lis.append(f'<li><a href="{doc["href"]}">{xml_escape(art_title)}</a></li>')
+        entry = f'<a href="{doc["href"]}">{xml_escape(art_title)}</a>'
+        if doc["published"]:
+            entry += f" <small>{xml_escape(_format_published(doc['published']))}</small>"
+        lis.append(f"<li>{entry}</li>")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<!DOCTYPE html>\n"

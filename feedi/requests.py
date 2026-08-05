@@ -5,7 +5,13 @@ import urllib.parse
 
 import requests
 
-USER_AGENT = "feedi/0.1.0 (+https://github.com/facundoolano/feedi)"
+# The "Mozilla/5.0 (compatible; name; +url)" shape is the one every user-agent sniffing
+# filter recognises as a well behaved crawler. This is not browser impersonation -- feedi
+# still names itself and links to its source -- but bare "feedi/0.1.0 (+url)" reads as a
+# too-generic agent to some sites, which serve a block page instead of the article. One
+# such filter (utcc.utoronto.ca) was returning a 1.7KB "you're using a tool with a
+# too-generic User-Agent" page that we happily extracted and stored as the article.
+USER_AGENT = "Mozilla/5.0 (compatible; feedi/0.1.0; +https://github.com/facundoolano/feedi)"
 TIMEOUT_SECONDS = 5
 TIMEOUT_SLOWER = 10
 

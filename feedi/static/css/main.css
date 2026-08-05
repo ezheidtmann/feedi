@@ -252,6 +252,17 @@ img[src=""] {
     letter-spacing: .03em;
 }
 
+/* A table wide enough to overflow the column gets clipped by the overflow-x:clip above,
+   so the columns past the edge are simply unreachable on a phone. display:block turns the
+   table into its own scroll box, which is the only way to get overflow-x to take effect on
+   a table element. (Wide <pre> blocks don't need this -- bulma's .content pre already
+   scrolls, and images are capped by its img{max-width:100%}.) */
+.entry-content table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
 /* tweak figure and iframe to handle embedded videos */
 .entry-content figure {
     margin-left: 0!important;
