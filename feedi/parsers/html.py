@@ -1,10 +1,9 @@
 import datetime
 import json
 
-import dateparser
 from bs4 import BeautifulSoup
 
-from feedi import scraping
+from feedi import dates, scraping
 from feedi.requests import requests
 
 
@@ -28,10 +27,9 @@ def fetch(url):
     if not title:
         raise ValueError(f"{url} is missing article metadata")
 
-    if "og:article:published_time" in metadata:
-        display_date = dateparser.parse(metadata["og:article:published_time"])
-    else:
-        display_date = datetime.datetime.utcnow()
+    # fall back to now for a page that states no date: the entry needs one to be sorted,
+    # and "just saved" is the closest thing we know
+    display_date = dates.from_html(soup, url) or datetime.datetime.utcnow()
 
     username = metadata.get("author", "").split(",")[0]
 

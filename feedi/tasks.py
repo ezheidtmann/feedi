@@ -175,8 +175,18 @@ def build_and_send_digest(user_id, source):
                 continue
 
             # entry_id lets us mark exactly the entries that made it into each email,
-            # once that email has actually been accepted by the mail server
-            items.append({"url": url, "article": article, "entry_id": entry.id})
+            # once that email has actually been accepted by the mail server.
+            # entry_date is the date the feed reported, shown when the page itself
+            # carries no date; entries saved by url have no feed to have reported one,
+            # their display_date is just when they were saved.
+            items.append(
+                {
+                    "url": url,
+                    "article": article,
+                    "entry_id": entry.id,
+                    "entry_date": entry.display_date if entry.feed_id else None,
+                }
+            )
             entry.content_full = article.get("content")
 
         successes = [it for it in items if "article" in it]

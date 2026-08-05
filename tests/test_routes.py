@@ -769,6 +769,38 @@ def test_package_epub_multi_article_structure():
         ET.fromstring(z.read("content.opf"))
 
 
+def test_package_epub_shows_publication_dates():
+    from feedi.scraping import package_epub
+
+    dateless = _make_fake_article("Article Two")
+    del dateless["publishedTime"]
+
+    items = [
+        {"url": "http://a.example.com/1", "article": _make_fake_article("Article One")},
+        # the page said nothing, but the feed this came from did
+        {
+            "url": "http://a.example.com/2",
+            "article": dateless,
+            "entry_date": dt.datetime(2023, 11, 3, 14, 30),
+        },
+        {"url": "http://a.example.com/3", "article": dict(dateless, title="Article Three")},
+    ]
+    data = package_epub(items, title="feedi digest", subtitle="Favorites")
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        assert "January 1, 2024" in z.read("article_1.html").decode()
+        assert "November 3, 2023" in z.read("article_2.html").decode()
+
+        # an article nobody has a date for just doesn't show one
+        third = z.read("article_3.html").decode()
+        assert "Article Three" in third
+        assert "2024" not in third and "2023" not in third
+
+        nav = z.read("nav.xhtml").decode()
+        assert "January 1, 2024" in nav
+        assert "November 3, 2023" in nav
+
+
 def _big_article(title, body_bytes):
     article = _make_fake_article(title)
     article["content"] = "<p>" + ("x" * body_bytes) + "</p>"

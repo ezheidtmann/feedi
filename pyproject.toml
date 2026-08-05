@@ -23,6 +23,7 @@ dependencies = [
     "flask-login",
     "Werkzeug",
     "dateparser",
+    "python-dateutil",
     "Pillow",
     "urllib3<2.3", # pinned to avoid https://github.com/gabrielfalcao/HTTPretty/issues/484
 ]
