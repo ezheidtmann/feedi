@@ -22,8 +22,14 @@ publication hosted there.
 
 import urllib.parse
 
-# A current desktop Chrome. Used only for sites that refuse the honest feedi agent;
-# everywhere else feedi keeps identifying itself (see feedi/requests.py).
+# The conventional crawler shape. Still names feedi and links to the project -- it is not
+# browser impersonation -- but it is the form user-agent filters are written to recognise.
+# Only for sites that refuse feedi's plainer default: applying it globally cost xeiaso.net
+# and lore.kernel.org most of their content, because they read it as a bot.
+CRAWLER_USER_AGENT = "Mozilla/5.0 (compatible; feedi/0.1.0; +https://github.com/facundoolano/feedi)"
+
+# A current desktop Chrome, for sites that serve nothing to anything self-identifying.
+# Prefer CRAWLER_USER_AGENT: impersonating a browser version means owning its expiry.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
@@ -57,6 +63,15 @@ class SiteRule:
 # Populated from measurements over the feeds this reader actually follows; each entry
 # notes what it fixes so a future reader can tell whether it is still needed.
 RULES = [
+    SiteRule(
+        "utcc.utoronto.ca",
+        user_agent=CRAWLER_USER_AGENT,
+        note="answers a too-generic agent with HTTP 200 and a 1.7KB 'you're using a tool "
+        "with a too-generic User-Agent' page, which we extracted and stored as the "
+        "article -- the reader showed the block page under the post's title. Wants the "
+        "conventional crawler shape; do NOT give it a browser agent, it rejects Chrome/127 "
+        "as too old and that becomes a maintenance treadmill",
+    ),
     SiteRule(
         "gilesthomas.com",
         strip=[".site-header", ".tagline", ".links-bar"],
