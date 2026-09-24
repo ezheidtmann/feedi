@@ -251,7 +251,9 @@ class RSSParser(CachingRequestsMixin):
             if soup.img:
                 return soup.img["src"]
 
-        parsed_dest_url = self.parse_content_url(entry)
+        # the preview should show whatever the entry points at, which isn't necessarily
+        # where its text is read from
+        parsed_dest_url = self.parse_target_url(entry)
         return self.fetch_meta(parsed_dest_url, "og:image", "twitter:image")
 
     def parse_remote_id(self, entry):
@@ -565,3 +567,42 @@ class IndieBlogParser(RSSParser):
         body = soup.blockquote
         body.name = "p"
         return str(body)
+
+
+class DaringFireballParser(RSSParser):
+    """
+    Daring Fireball mixes John Gruber's own articles with "linked list" posts: short
+    pieces commenting on somebody else's article. For those, the entry link points at the
+    article being commented on and Gruber's post lives at a separate permalink, published
+    in the entry as a rel="related" link. Taking the link as the content url made the
+    reader show the linked article under the post's title, so the commentary --which is
+    the reason to follow this feed-- could only ever be seen truncated in the feed preview.
+    """
+
+    @staticmethod
+    def is_compatible(feed_url):
+        return "daringfireball.net" in feed_url
+
+    @staticmethod
+    def _post_url(entry):
+        """
+        For an entry that links elsewhere, return the permalink of the post itself.
+        Articles link to their own permalink and don't carry one of these.
+        """
+        for link in entry.get("links", []):
+            if link.get("rel") == "related" and link.get("href") != entry.get("link"):
+                return link["href"]
+
+    def parse_content_url(self, entry):
+        # read the linked list post, not the article it comments on; that one stays a
+        # click away as the target url
+        return self._post_url(entry) or super().parse_content_url(entry)
+
+    def parse_target_url(self, entry):
+        return entry["link"]
+
+    def parse_content_full(self, entry):
+        # linked list posts come whole in the feed, so the reader doesn't need to fetch
+        # the permalink to show them
+        if self._post_url(entry):
+            return entry.get("summary")
