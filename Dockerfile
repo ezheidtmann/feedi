@@ -15,6 +15,10 @@ RUN cd kindle-client && npm run build
 
 FROM python:3.13-alpine
 
+# uv manages the app's venv; the base image's pip is unused at runtime and
+# vendors its own urllib3, msgpack and setuptools, with CVEs of their own
+RUN python -m pip uninstall -y pip
+
 # Copy node (and the shared libs it links against) to python-alpine image
 COPY --from=node /usr/lib /usr/lib
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
