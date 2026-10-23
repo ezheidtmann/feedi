@@ -1,7 +1,7 @@
-FROM node:20-alpine AS node
+FROM node:24-alpine AS node
 
 # Build the Svelte-based Kindle client bundle in a dedicated stage
-FROM node:20-alpine AS kindle-client-build
+FROM node:24-alpine AS kindle-client-build
 WORKDIR /build
 COPY kindle-client/package.json kindle-client/package-lock.json* ./kindle-client/
 RUN cd kindle-client && (npm ci || npm install)
