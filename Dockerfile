@@ -1,4 +1,9 @@
+# Install the readability extractor's node dependencies here so the final image
+# needs only the node binary, not npm (whose bundled modules carry their own CVEs)
 FROM node:24-alpine AS node
+WORKDIR /deps
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # Build the Svelte-based Kindle client bundle in a dedicated stage
 FROM node:24-alpine AS kindle-client-build
@@ -10,11 +15,9 @@ RUN cd kindle-client && npm run build
 
 FROM python:3.11-alpine
 
-# Copy node to python-alpine image
+# Copy node (and the shared libs it links against) to python-alpine image
 COPY --from=node /usr/lib /usr/lib
-COPY --from=node /usr/local/lib /usr/local/lib
-COPY --from=node /usr/local/include /usr/local/include
-COPY --from=node /usr/local/bin /usr/local/bin
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /app
 
@@ -26,10 +29,7 @@ COPY pyproject.toml uv.lock ./
 
 RUN uv sync --frozen --no-dev --no-cache
 
-# Install node dependencies
-COPY package*.json ./
-
-RUN npm ci --omit=dev
+COPY --from=node /deps/node_modules ./node_modules
 
 COPY . .
 
