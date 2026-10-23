@@ -41,4 +41,4 @@ EXPOSE 9988
 # run in dev by default, override with docker run -e FLASK_ENV=production
 ENV FLASK_ENV=development
 
-CMD ["sh", "-c", "uv run gunicorn -b 0.0.0.0:9988 --env FLASK_ENV=${FLASK_ENV}"]
+CMD ["sh", "-c", "uv run --no-sync gunicorn -b 0.0.0.0:9988 --env FLASK_ENV=${FLASK_ENV}"]
