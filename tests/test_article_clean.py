@@ -1,11 +1,10 @@
 from unittest import mock
 
-import httpretty
 from bs4 import BeautifulSoup
 
 import feedi.scraping as scraping
 from feedi import article_clean, site_rules
-from tests.conftest import mock_request
+from tests.conftest import last_request, mock_request
 
 PROSE = (
     "The extended train ran for forty hours before it crashed, which was long enough to "
@@ -155,7 +154,7 @@ def test_site_rule_overrides_the_user_agent_for_a_fetch(app):
     with mock.patch.object(site_rules, "RULES", [rule]), app.app_context():
         scraping.extract(url)
 
-    assert httpretty.last_request().headers["User-Agent"] == "Mozilla/5.0 (pretend browser)"
+    assert last_request().headers["User-Agent"] == "Mozilla/5.0 (pretend browser)"
 
 
 def test_fetches_identify_feedi_without_a_rule(app):
@@ -170,7 +169,7 @@ def test_fetches_identify_feedi_without_a_rule(app):
     with mock.patch.object(site_rules, "RULES", []), app.app_context():
         scraping.extract(url)
 
-    agent = httpretty.last_request().headers["User-Agent"]
+    agent = last_request().headers["User-Agent"]
     assert "feedi/0.1.0" in agent
     assert "github.com/facundoolano/feedi" in agent
     assert "Chrome" not in agent and "Safari" not in agent
@@ -184,7 +183,7 @@ def test_site_rule_rewrites_the_url(app):
     with mock.patch.object(site_rules, "RULES", [rule]), app.app_context():
         scraping.extract("http://rewrite.example.com/post")
 
-    assert httpretty.last_request().path == "/post?print=1"
+    assert last_request().path == "/post?print=1"
 
 
 def test_strips_elements_the_page_hides():

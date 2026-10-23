@@ -57,8 +57,8 @@ def _is_private_address(host):
 
 
 def _ssrf_guard_enabled():
-    # httpretty (used in tests) resolves mocked hostnames to 127.0.0.1, which would trip
-    # the private-IP check. Let the test/dev config opt out.
+    # mocket (used in tests) "resolves" mocked hostnames to the hostname itself rather than an
+    # IP, which the guard refuses. Let the test/dev config opt out.
     try:
         import flask
 

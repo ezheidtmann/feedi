@@ -1,12 +1,18 @@
 import os
 import re
 import uuid
+from types import SimpleNamespace
+
+# feedi.app runs gevent's monkey patching, which has to happen before mocket
+# imports ssl and urllib3, as it does in production before anything else
+import feedi.app as feedi_app  # isort: skip
 
 import feedgen.feed as feedgen
-import httpretty
 import pytest
+from mocket import Mocket, Mocketizer
+from mocket.mockhttp import Entry, Response
+from requests.structures import CaseInsensitiveDict
 
-import feedi.app as feedi_app
 from feedi.models import db
 
 
@@ -16,11 +22,14 @@ def app():
 
     app = feedi_app.create_app()
 
-    httpretty.enable(allow_net_connect=False, verbose=True)
+    # strict mode: a request to anything not registered with mock_request raises
+    # instead of reaching the real network
+    mocketizer = Mocketizer(strict_mode=True)
+    mocketizer.enter()
 
     yield app
 
-    httpretty.disable()
+    mocketizer.exit()
 
     # clean up / reset resources
     with app.app_context():
@@ -46,7 +55,7 @@ def client(app):
     response = client.post("/auth/login", data={"email": email, "password": "password"}, follow_redirects=True)
     assert response.status_code == 200
 
-    httpretty.reset()
+    Mocket.reset()
     return client
 
 
@@ -95,8 +104,19 @@ def mock_feed(domain, items):
 
 
 def mock_request(url, body="", ctype="application/html"):
-    httpretty.register_uri(httpretty.HEAD, url, adding_headers={"Content-Type": ctype}, priority=1)
-    httpretty.register_uri(httpretty.GET, url, body=body, adding_headers={"Content-Type": ctype}, priority=1)
+    "Serve `body` for GET and an empty body for HEAD on `url`, ignoring its query string."
+    for method, method_body in ((Entry.HEAD, ""), (Entry.GET, body)):
+        response = Response(body=method_body, headers={"Content-Type": ctype})
+        entry = Entry(url, method, (response,), match_querystring=False)
+        # mocket serves the first matching entry; put new ones first so that mocking
+        # a url again (e.g. a feed with new items) replaces the earlier response
+        Mocket._entries[entry.location].insert(0, entry)
+
+
+def last_request():
+    "The most recent mocked request, with case-insensitive headers (mocket lowercases them)."
+    request = Mocket.last_request()
+    return SimpleNamespace(method=request.method, path=request.path, headers=CaseInsensitiveDict(request.headers))
 
 
 def extract_entry_ids(response):

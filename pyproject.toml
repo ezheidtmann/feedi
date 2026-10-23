@@ -25,7 +25,7 @@ dependencies = [
     "dateparser",
     "python-dateutil",
     "Pillow",
-    "urllib3<2.3", # pinned to avoid https://github.com/gabrielfalcao/HTTPretty/issues/484
+    "urllib3>=2.6.3", # CVE floor: decompression-bomb and redirect fixes
 ]
 
 [dependency-groups]
@@ -34,7 +34,7 @@ dev = [
     "ipdb",
     "flask-shell-ipython",
     "pytest",
-    "httpretty",
+    "mocket",
     "feedgen",
     "ruff"
 ]
