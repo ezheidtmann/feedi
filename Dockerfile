@@ -13,7 +13,7 @@ RUN cd kindle-client && (npm ci || npm install)
 COPY kindle-client ./kindle-client
 RUN cd kindle-client && npm run build
 
-FROM python:3.11-alpine
+FROM python:3.13-alpine
 
 # Copy node (and the shared libs it links against) to python-alpine image
 COPY --from=node /usr/lib /usr/lib
